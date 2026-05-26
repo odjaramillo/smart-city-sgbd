@@ -543,5 +543,54 @@ END $$;
 
 
 -- =============================================================================
--- APÉNDICE A: GUÍA E2E — (se agregará en el siguiente commit)
+-- APÉNDICE A: GUÍA E2E — Secuencia completa para ejecución en Supabase
+-- (No se ejecuta automáticamente; es documentación inline para la defensa)
 -- =============================================================================
+
+/*
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         GUÍA DE EJECUCIÓN E2E EN SUPABASE                     │
+│                         (Copiar y pegar paso a paso)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PASO 1: Crear el esquema dimensional y la dimensión de tiempo                 │
+│         Archivo: 01-ddl-modelo-estrella.sql                                   │
+│         Acción:  Pegar todo el contenido en el SQL Editor de Supabase        │
+│                   y ejecutar.                                                │
+│         Tiempo:  ~30-60 segundos (la carga de dim_tiempo con ~5.7M filas     │
+│                   puede tardar 20-40s dependiendo del tier).                │
+│         Output:  CREATE TABLE / CREATE INDEX / INSERT 0 5.7M aprox.          │
+│                                                                                │
+│ PASO 2: Crear el stored procedure de reconciliación ELT                     │
+│         Archivo: 02-sp-reconciliacion-elt.sql                                 │
+│         Acción:  Pegar y ejecutar.                                            │
+│         Tiempo:  < 1 segundo.                                                │
+│         Output:  CREATE PROCEDURE / CREATE FUNCTION                           │
+│                                                                                │
+│ PASO 3: Crear las vistas analíticas y funciones auxiliares                  │
+│         Archivo: 03-vistas-analiticas.sql                                     │
+│         Acción:  Pegar y ejecutar.                                            │
+│         Tiempo:  < 1 segundo.                                                │
+│         Output:  CREATE VIEW × 7 / CREATE FUNCTION × 2                      │
+│                                                                                │
+│ PASO 4: Cargar los datos semilla generados por el script Python             │
+│         Archivo: 04-datos-semilla.sql                                         │
+│         Acción:  Pegar y ejecutar.                                            │
+│         Tiempo:  ~2-5 minutos (10.842 eventos de staging en 22 batches).      │
+│         Output:  INSERT 0 8 (geografía) + INSERT 0 300 (red) +               │
+│                   INSERT 0 2 (clientes) + INSERT 0 10842 (eventos)            │
+│                                                                                │
+│ PASO 5: Ejecutar el protocolo de verificación smoke test                    │
+│         Archivo: 05-verificacion-smoke-test.sql                               │
+│         Acción:  Pegar y ejecutar.                                            │
+│         Tiempo:  ~10-30 segundos (incluye 3 ejecuciones del SP).              │
+│         Output:  Mensajes RAISE NOTICE en verde indicando cada sección       │
+│                   pasada. Si todo está bien, el resumen final muestra:       │
+│                   "SMOKE TEST COMPLETADO CON ÉXITO".                          │
+│                                                                                │
+│ PASO 6: Verificar manualmente las vistas desde el Table Editor             │
+│         Acción:  Explorar vw_saidi_saifi_mensual, vw_heatmap_interrupciones, │
+│                   vw_ranking_subestaciones.                                    │
+│         Validar: > 0 filas, valores de SAIDI/SAIFI coherentes,               │
+│                   subestaciones presentes, franjas horarias cubiertas.       │
+└─────────────────────────────────────────────────────────────────────────────┘
+*/
