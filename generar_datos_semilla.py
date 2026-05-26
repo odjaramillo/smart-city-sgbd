@@ -586,10 +586,6 @@ def parse_args():
         "--transformers-per-circuit", type=int, default=3,
         help="Transformadores por circuito (default: 3)"
     )
-    parser.add_argument(
-        "--meters-per-transformer", type=int, default=None,
-        help="Medidores por transformador (default: auto-distribuido)"
-    )
     return parser.parse_args()
 
 

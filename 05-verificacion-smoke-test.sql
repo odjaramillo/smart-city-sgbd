@@ -312,6 +312,7 @@ DO $$
 DECLARE
     v_fact_before   INTEGER;
     v_err_before    INTEGER;
+    v_lote_id_1     INTEGER;
     v_lote_id_2     INTEGER;
     v_lote_id_3     INTEGER;
     v_fact_after_2  INTEGER;
@@ -324,6 +325,7 @@ BEGIN
     -- Cargar conteos base
     SELECT value INTO v_fact_before FROM smoke_test_state WHERE key = 'fact_count_1';
     SELECT value INTO v_err_before  FROM smoke_test_state WHERE key = 'err_count_1';
+    SELECT value INTO v_lote_id_1   FROM smoke_test_state WHERE key = 'lote_id_1';
 
     -- ── Ejecución 2 ──
     CALL sp_reconciliar_interrupciones(NULL, NULL);
@@ -373,10 +375,13 @@ BEGIN
         RAISE EXCEPTION 'SECCIÓN 5 FALLIDA (Run 3) — Lote % debería tener total_hechos=0, tiene %.', v_lote_id_3, v_lote3_hechos;
     END IF;
 
-    -- 4.2 Validar que hay exactamente 3 lotes, y los 2 últimos tienen 0 hechos
-    IF NOT (v_lote_id_3 = 3 AND v_lote2_hechos = 0 AND v_lote3_hechos = 0) THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — Se esperaban 3 lotes (2 últimos con 0 hechos). Lotes=%/% hechos=%/%',
-            v_lote_id_2, v_lote_id_3, v_lote2_hechos, v_lote3_hechos;
+    -- 4.2 Validar que los lotes son consecutivos y los 2 últimos tienen 0 hechos
+    IF NOT (v_lote_id_2 = v_lote_id_1 + 1
+        AND v_lote_id_3 = v_lote_id_2 + 1
+        AND v_lote2_hechos = 0
+        AND v_lote3_hechos = 0) THEN
+        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — Lotes no consecutivos (base=%, run2=%, run3=%) o con hechos ≠ 0 (run2=%, run3=%).',
+            v_lote_id_1, v_lote_id_2, v_lote_id_3, v_lote2_hechos, v_lote3_hechos;
     END IF;
 
     RAISE NOTICE '✓ Run 3 idempotente: lote % con 0 hechos nuevos.', v_lote_id_3;
@@ -428,6 +433,13 @@ BEGIN
     WHERE subestacion LIKE '%DESCONOCIDO%';
     IF v_count > 0 THEN
         RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_red_electrica tiene % filas con subestacion DESCONOCIDO.', v_count;
+    END IF;
+
+    SELECT COUNT(*) INTO v_count FROM dim_clientes_inventario
+    WHERE total_clientes_servidos = 1
+      AND fecha_inicio = '2020-01-01 00:00:00+00'::TIMESTAMPTZ;
+    IF v_count > 0 THEN
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_clientes_inventario tiene % fila(s) de fallback (total_clientes_servidos=1).', v_count;
     END IF;
 
     RAISE NOTICE '✓ SECCIÓN 6 PASADA: Zero fallback dimension rows (0 DESCONOCIDO en todas las tablas).';
