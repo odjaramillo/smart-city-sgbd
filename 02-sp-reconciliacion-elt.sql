@@ -326,15 +326,15 @@ BEGIN
             -- SK de geografía: se obtiene desde dim_red_electrica vía JOIN
             -- (En una implementación real, la geografía se vincula al medidor en su dimensión)
             -- Para este proyecto académico, buscamos una entrada geográfica por defecto
-            SELECT sk_geografia INTO v_sk_geo
+            SELECT sk_geografia_urbana INTO v_sk_geo
             FROM dim_geografia_urbana
-            ORDER BY sk_geografia
+            ORDER BY sk_geografia_urbana
             LIMIT 1;
 
             IF v_sk_geo IS NULL THEN
                 INSERT INTO dim_geografia_urbana (sector_urbano, distrito)
                 VALUES ('SECTOR_DESCONOCIDO', 'DISTRITO_DESCONOCIDO')
-                RETURNING sk_geografia INTO v_sk_geo;
+                RETURNING sk_geografia_urbana INTO v_sk_geo;
             END IF;
 
             -- SK de clientes (denominador dinámico SCD Tipo 2): inventario activo al momento de la interrupción

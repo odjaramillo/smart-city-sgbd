@@ -68,7 +68,7 @@ BEGIN
         ('dim_red_electrica', 'fecha_fin'),
         ('dim_red_electrica', 'activo_bool'),
         -- Tabla: dim_geografia_urbana
-        ('dim_geografia_urbana', 'sk_geografia'),
+        ('dim_geografia_urbana', 'sk_geografia_urbana'),
         ('dim_geografia_urbana', 'sector_urbano'),
         ('dim_geografia_urbana', 'distrito'),
         ('dim_geografia_urbana', 'latitud'),

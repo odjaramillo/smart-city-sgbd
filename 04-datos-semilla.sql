@@ -2,7 +2,7 @@
 -- PROYECTO: Arquitectura Analítica de Resiliencia para Smart City (Smart Grid)
 -- GENERADO AUTOMÁTICAMENTE por generar_datos_semilla.py
 -- Seed: 42 | Días: 60 | Medidores: 300
--- Fecha generación: 2026-05-26T01:06:59.384430+00:00
+-- Fecha generación: 2026-05-26T02:21:34.955729+00:00
 -- ==============================================================================
 
 BEGIN;

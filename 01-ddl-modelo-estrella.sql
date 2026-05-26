@@ -109,7 +109,7 @@ Dimensión Geografía Urbana (dim_geografia_urbana)
   riesgo (ej. hospitales, centros de datos, estaciones de bomberos).
 */
 CREATE TABLE dim_geografia_urbana (
-    sk_geografia      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    sk_geografia_urbana BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     sector_urbano     VARCHAR(100)  NOT NULL,
     distrito          VARCHAR(100)  NOT NULL,
     latitud           NUMERIC(9,6),
