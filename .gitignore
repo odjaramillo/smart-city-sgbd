@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated SQL artifact (committed intentionally, but mark as generated)
+# 04-datos-semilla.sql is generated — no need to review line-by-line
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Supabase
+.env
+.supabase/
+
+# Engram cache
+.atl/.skill-registry.cache.json
