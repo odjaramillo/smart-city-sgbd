@@ -43,13 +43,14 @@ def kpi_card(title, value, delta=None, icon="bi bi-lightning-charge-fill"):
     )
 
 
-def kpi_row(kpi_data=None):
+def kpi_row(kpi_data=None, id="kpi-row"):
     """
     Row with 4 KPI cards: SAIDI ciudad, SAIFI ciudad, CAIDI ciudad, total interrupciones.
 
     Args:
         kpi_data: dict with keys saidi, saifi, caidi, total_interrupciones
                   Each value is a dict with 'value', 'delta' (optional), 'icon' (optional)
+        id: DOM id for the outer Row container (default "kpi-row")
     """
     if kpi_data is None:
         kpi_data = {
@@ -86,4 +87,4 @@ def kpi_row(kpi_data=None):
         ),
     ]
 
-    return dbc.Row([dbc.Col(card, width=3) for card in cards], className="kpi-row g-4")
+    return dbc.Row([dbc.Col(card, width=3) for card in cards], className="kpi-row g-4", id=id)

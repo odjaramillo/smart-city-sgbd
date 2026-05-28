@@ -66,6 +66,18 @@ def elt_status_table(elt_df=None):
     )
 
 
+def refresh_ops_button():
+    """Refresh button for the ops panel."""
+    return dbc.Button(
+        "⟳ Actualizar",
+        id="refresh-ops",
+        color="primary",
+        size="sm",
+        className="refresh-btn",
+        n_clicks=0,
+    )
+
+
 def error_audit_chart(error_df=None):
     """
     Error audit chart for data quality monitoring.
@@ -87,7 +99,10 @@ def ops_section(elt_df=None, error_df=None):
             dbc.Row(
                 dbc.Col(
                     [
-                        html.H5("Monitoreo ELT", className="section-title"),
+                        html.Div(
+                            [html.H5("Monitoreo ELT", className="section-title d-inline me-2"), refresh_ops_button()],
+                            className="d-flex align-items-center mb-2",
+                        ),
                         elt_status_table(elt_df),
                     ],
                     width=12,

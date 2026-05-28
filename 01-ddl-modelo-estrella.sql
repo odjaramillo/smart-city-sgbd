@@ -1,12 +1,13 @@
+-- Active: 1779816248964@@192.168.1.48@5432@ucab_project
 -- ==============================================================================
 -- PROYECTO: Arquitectura Analítica de Resiliencia para Smart City (Smart Grid)
 -- MATERIA:  Gestión de Datos — Prof. Armen Djenanian
 -- FASE 1:   Modelado Dimensional (Metodología Kimball) + Estrategia de Indexación
 -- PLATAFORMA: Supabase (PostgreSQL 15+)
---
+-- SELECT count(*) FROM dim_tiempo
 -- NOTAS DE ARQUITECTURA (embebidas como comentarios):
 --   - Modelo en Estrella clásico con una única tabla de hechos atómica y cuatro
---     dimensiones desnormalizadas. Se eligió Estrella sobre Copo de Nieve porque
+--     dimensiones desnormworkspacealizadas. Se eligió Estrella sobre Copo de Nieve porque
 --     el perfil de carga es 95 % lectura analítica (Power BI) y 5 % escritura ELT.
 --     Cada JOIN extra en un Copo de Nieve penaliza el rendimiento de escaneo
 --     secuencial sobre fact_interrupciones sin beneficio compensatorio.

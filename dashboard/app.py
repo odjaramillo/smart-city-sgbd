@@ -18,6 +18,13 @@ app = dash.Dash(
 )
 server = app.server  # expose server for gunicorn deployment
 
+# Initialize cache
+cache = queries.get_cache()
+cache.init_app(app.server, config={
+    "CACHE_TYPE": "SimpleCache",
+    "CACHE_DEFAULT_TIMEOUT": 300,
+})
+
 # Header
 header = dbc.Navbar(
     dbc.Container(
@@ -45,6 +52,9 @@ header = dbc.Navbar(
     className="dashboard-header",
 )
 
+# KPI row with id for callback targeting
+kpi_row_component = overview.kpi_row(id="kpi-row")
+
 # Main layout
 app.layout = dbc.Container(
     [
@@ -66,7 +76,7 @@ app.layout = dbc.Container(
                 html.Div(
                     [
                         # Row 1: KPI cards
-                        overview.kpi_row(),
+                        kpi_row_component,
                         # Row 2: Trend chart (left) + Ranking bar (right)
                         dbc.Row(
                             [
@@ -102,17 +112,9 @@ app.layout = dbc.Container(
                         # Row 4: Ops panel (ELT monitoring + error audit)
                         dbc.Row(
                             dbc.Col(
-                                ops.elt_status_table(None),
+                                ops.ops_section(None, None),
                                 width=12,
                                 className="table-col",
-                            ),
-                            className="section-row",
-                        ),
-                        dbc.Row(
-                            dbc.Col(
-                                ops.error_audit_chart(None),
-                                width=12,
-                                className="chart-col",
                             ),
                             className="section-row",
                         ),
@@ -127,6 +129,10 @@ app.layout = dbc.Container(
     fluid=True,
     className="dashboard-container",
 )
+
+
+# Import callbacks to register them (must happen after app is defined)
+from dashboard import callbacks  # noqa: F401, E402
 
 
 if __name__ == "__main__":

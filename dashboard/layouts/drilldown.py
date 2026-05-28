@@ -40,7 +40,7 @@ def drilldown_breadcrumb(breadcrumb=None):
                 )
             )
 
-    return dbc.Breadcrumb(items, className="drilldown-breadcrumb")
+    return dbc.Breadcrumb(items, className="drilldown-breadcrumb", id=id)
 
 
 def drilldown_selectors(subestaciones=None, circuitos=None, transformadores=None):
