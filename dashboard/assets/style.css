@@ -1,0 +1,314 @@
+/**
+ * Dashboard custom styles — DARKLY theme overrides
+ */
+
+/* ==================================================================
+   CSS Variables — DARKLY palette
+   ================================================================== */
+:root {
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #2d2d2d;
+    --bg-tertiary: #262626;
+    --text-primary: #e0e0e0;
+    --text-secondary: #adb5bd;
+    --accent-blue: #00b4d8;
+    --accent-red: #e74c3c;
+    --accent-green: #2ecc71;
+    --accent-yellow: #f39c12;
+    --border-color: #333333;
+}
+
+/* ==================================================================
+   Global
+   ================================================================== */
+body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* ==================================================================
+   Header
+   ================================================================== */
+.dashboard-header {
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 1rem;
+}
+
+.dashboard-header .navbar-brand {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary) !important;
+    letter-spacing: 0.02em;
+}
+
+/* ==================================================================
+   Filters Bar
+   ================================================================== */
+.filters-row {
+    background-color: var(--bg-secondary);
+    padding: 1rem 1.5rem;
+    border-radius: 0.375rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--border-color);
+}
+
+.filters-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-end;
+}
+
+.filter-col .filter-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+.med-toggle-col {
+    display: flex;
+    align-items: flex-end;
+    padding-bottom: 0.5rem;
+}
+
+/* Dropdown override for dark theme */
+.Select-placeholder,
+.Select--single > .Select-control .Select-value,
+.Select-value-label {
+    color: var(--text-primary) !important;
+}
+
+.Select-control {
+    background-color: var(--bg-tertiary) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-primary) !important;
+}
+
+.Select-menu-outer {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.Select-option {
+    color: var(--text-primary);
+}
+
+.Select-option:hover,
+.Select-option.is-focused {
+    background-color: var(--bg-tertiary);
+}
+
+/* Date picker */
+.DateInput_input {
+    background-color: var(--bg-tertiary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+.DateInput_input__focused {
+    border-color: var(--accent-blue) !important;
+}
+
+.DateRangePicker {
+    background-color: var(--bg-tertiary);
+    border-radius: 0.375rem;
+}
+
+/* ==================================================================
+   KPI Cards
+   ================================================================== */
+.kpi-row {
+    margin-bottom: 1rem;
+}
+
+.kpi-card {
+    background-color: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    text-align: center;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    height: 100%;
+}
+
+.kpi-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.kpi-card .card-body {
+    padding: 0.75rem;
+}
+
+.kpi-icon {
+    color: var(--accent-blue);
+    margin-bottom: 0.5rem;
+}
+
+.kpi-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+.kpi-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.1;
+    margin-bottom: 0.25rem;
+}
+
+.kpi-delta {
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+/* ==================================================================
+   Section Layout
+   ================================================================== */
+.section-row {
+    margin-bottom: 1.5rem;
+}
+
+.section-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.chart-col,
+.table-col {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+/* ==================================================================
+   Charts
+   ================================================================== */
+.chart-panel {
+    width: 100%;
+}
+
+.js-plotly-plot .plotly .modebar {
+    background: transparent;
+}
+
+/* ==================================================================
+   DataTable
+   ================================================================== */
+.dash-table-container {
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+/* Drill-down breadcrumb */
+.drilldown-breadcrumb {
+    background-color: transparent;
+    padding: 0;
+    margin-bottom: 0.5rem;
+}
+
+.drilldown-breadcrumb .breadcrumb-link {
+    color: var(--accent-blue);
+    font-size: 0.875rem;
+    text-decoration: none;
+}
+
+.drilldown-breadcrumb .breadcrumb-link:hover {
+    text-decoration: underline;
+}
+
+.drilldown-breadcrumb .breadcrumb-active {
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.drilldown-breadcrumb .separator::before {
+    content: " › ";
+    color: var(--text-secondary);
+}
+
+/* ==================================================================
+   Heatmap Franja Breakdown
+   ================================================================== */
+.franja-list {
+    padding: 0;
+}
+
+.franja-row {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border-color);
+    align-items: center;
+}
+
+.franja-row:last-child {
+    border-bottom: none;
+}
+
+.franja-label {
+    font-size: 0.875rem;
+    color: var(--text-primary);
+}
+
+.franja-value {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--accent-red);
+    text-align: right;
+}
+
+.franja-progress {
+    height: 6px;
+}
+
+/* ==================================================================
+   ELT Status Table — state coloring
+   ================================================================== */
+#elt-status-table {
+    border-radius: 0.5rem;
+}
+
+/* ==================================================================
+   Responsive
+   ================================================================== */
+@media (max-width: 992px) {
+    .kpi-card {
+        margin-bottom: 0.75rem;
+    }
+
+    .chart-col,
+    .table-col {
+        margin-bottom: 1rem;
+    }
+}
+
+@media (max-width: 768px) {
+    .kpi-value {
+        font-size: 1.25rem;
+    }
+
+    .filters-bar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .filter-col {
+        width: 100%;
+    }
+}
