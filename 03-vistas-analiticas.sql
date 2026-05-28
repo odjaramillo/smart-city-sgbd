@@ -2,521 +2,555 @@
 -- PROYECTO: Arquitectura Analítica de Resiliencia para Smart City (Smart Grid)
 -- MATERIA:  Gestión de Datos — Prof. Armen Djenanian
 -- FASE 3:   Capa Analítica de Explotación — Vistas SQL para Power BI
--- PLATAFORMA: Supabase (PostgreSQL 15+)
+-- PLATAFORMA: PostgreSQL 15+ (Supabase)
 --
--- NOTAS DE ARQUITECTURA (embebidas como comentarios):
+-- NOTAS DE ARQUITECTURA:
 --
---   Todas las vistas están diseñadas para ser importadas directamente en Power BI
---   sin transformaciones adicionales en Power Query. Esto sigue el principio de
---   "ELT over ETL": la base de datos hace el trabajo pesado y Power BI solo
---   renderiza. Las vistas son SELECT simples sin CTEs recursivos, LATERAL JOINs
---   ni funciones de ventana complejas que Power BI no pueda plegar (query folding).
---
---   Denominador dinámico (SCD Tipo 2):
---     Cada vista analítica resuelve el total de clientes servidos al momento
---     exacto de la interrupción mediante JOIN con dim_clientes_inventario usando
---     el rango de vigencia [fecha_inicio, fecha_fin). Esto garantiza que un SAIDI
---     de 2023 use el total de clientes de 2023, no el actual.
---
---     Para agregaciones diarias/mensuales, se toma el total_clientes_servidos de
---     la primera interrupción del período (que corresponde al inventario activo
---     en ese momento). En la práctica, el inventario de clientes no cambia
---     intra-día, por lo que esta aproximación es exacta a nivel diario.
+--   IEEE 1366 — Fórmulas correctas:
+--     SAIDI = SUM(duracion_minutos) / total_clientes_servidos
+--       Minutos totales de interrupción por cada cliente servido.
+--     SAIFI = SUM(clientes_afectados) / total_clientes_servidos
+--       Cantidad de interrupciones por cada cliente servido.
+--     La versión anterior usaba COUNT(interrupciones) para SAIFI (incorrecto)
+--     y SUM(duracion * clientes) para SAIDI. Esta versión corrige ambas.
 --
 --   MED Days (Major Event Days) — IEEE 1366, método 2.5 Beta:
---     Los MED son días con interrupciones catastróficas (tormentas, apagones
---     nacionales) que distorsionarían los indicadores rutinarios. El estándar
---     IEEE 1366 establece que estos días deben identificarse estadísticamente y
---     excluirse de los reportes de desempeño rutinario.
+--     El umbral MED se calcula sobre la BASELINE COMPLETA (todos los días con
+--     interrupciones), SIN excluir días MED previamente. La versión anterior
+--     leía de una vista que ya filtraba excluido_med = FALSE, creando una
+--     espiral: el umbral dependía de datos que ya excluían MED.
+--     Aquí la función fn_calcular_umbral_med() consulta directamente
+--     fact_interrupciones + dim_tiempo + dim_clientes_inventario.
 --
---     El algoritmo implementado:
---       1. Calcular SAIDI diario para todo el histórico.
---       2. Tomar ln(SAIDI + 1) para cada día con SAIDI > 0.
---       3. α = media de los ln, β = desviación estándar de los ln.
---       4. Umbral T_MED = exp(α + 2.5 × β) - 1.
---       5. Cualquier día con SAIDI > T_MED es MED.
+--   Aritmética de fechas con INTERVAL:
+--     Toda comparación y cálculo de rango temporal usa INTERVAL nativo de
+--     PostgreSQL, no aritmética de enteros (anio * 100 + mes).
 --
---     La función fn_calcular_umbral_med() implementa este cálculo de forma
---     dinámica: se recalcula cada vez que se consulta la vista, reflejando
---     automáticamente nuevos datos y cambios en la distribución.
+--   Granularidad separada:
+--     No se usa GROUPING SETS que mezcla niveles de agregación en un solo
+--     resultado sin discriminador. Cada vista opera en un nivel de granularidad
+--     explícito. Si se necesita drill-down, se usan vistas separadas o
+--     columnas de nivel con GROUPING() para distinguir totales de detalles.
+--
+--   Sin años hardcodeados:
+--     Ninguna vista usa EXTRACT(YEAR FROM NOW()) como filtro fijo. Se usan
+--     rangos dinámicos con INTERVAL o se deja el filtrado al consumidor.
 -- ==============================================================================
 
 
 -- =============================================================================
--- VISTA BASE: SAIDI y SAIFI diario con denominador dinámico SCD Tipo 2
+-- FUNCIÓN: Umbral MED (IEEE 1366, método 2.5 Beta) — sobre baseline completa
 -- =============================================================================
 
 /*
-Esta vista es la base atómica para todas las agregaciones posteriores.
-Cada fila representa un día calendario con:
-  - saidi_diario: Σ(duración × clientes_afectados) / total_clientes_servidos
-  - saifi_diario: Σ(clientes_afectados) / total_clientes_servidos
+Algoritmo IEEE 1366-2012, Sección 5.4:
+  1. Calcular SAIDI diario para TODO el histórico (sin excluir MED).
+  2. Para días con SAIDI > 0: transformación ln(SAIDI).
+  3. α = media de los ln, β = desviación estándar poblacional.
+  4. T_MED = exp(α + 2.5 × β).
+  5. Días con SAIDI > T_MED son Major Event Days.
 
-El JOIN con dim_clientes_inventario resuelve el denominador correcto para
-cada fecha usando la ventana de vigencia del SCD Tipo 2.
-
-El JOIN con dim_tiempo permite filtrar por año/mes/trimestre en Power BI
-sin necesidad de cálculos adicionales.
-*/
-CREATE OR REPLACE VIEW vw_saidi_saifi_diario AS
-SELECT
-    dt.anio,
-    dt.mes,
-    dt.nombre_mes,
-    dt.trimestre,
-    dt.dia,
-    dt.timestamp_completo::DATE                              AS fecha,
-
-    -- Métricas de interrupción
-    COUNT(fi.sk_interrupcion)                                AS total_interrupciones,
-    COALESCE(SUM(fi.duracion_minutos * fi.clientes_afectados), 0)
-        AS suma_minutos_cliente,
-
-    -- Denominador dinámico: total de clientes servidos en esa fecha
-    -- (SCD Tipo 2: buscamos la fila del inventario activa en ese momento)
-    MAX(ci.total_clientes_servidos)                          AS total_clientes_servidos,
-
-    -- SAIDI diario = Σ(duración × clientes_afectados) / total_clientes_servidos
-    CASE
-        WHEN MAX(ci.total_clientes_servidos) > 0
-        THEN ROUND(
-            COALESCE(SUM(fi.duracion_minutos * fi.clientes_afectados), 0)
-            / MAX(ci.total_clientes_servidos)::NUMERIC,
-            4
-        )
-        ELSE 0
-    END                                                      AS saidi_diario,
-
-    -- SAIFI diario = Σ(clientes_afectados) / total_clientes_servidos
-    CASE
-        WHEN MAX(ci.total_clientes_servidos) > 0
-        THEN ROUND(
-            COUNT(fi.sk_interrupcion)::NUMERIC
-            / MAX(ci.total_clientes_servidos)::NUMERIC,
-            4
-        )
-        ELSE 0
-    END                                                      AS saifi_diario
-
-FROM dim_tiempo dt
-LEFT JOIN fact_interrupciones fi
-    ON fi.sk_tiempo = dt.sk_tiempo
-    AND fi.excluido_med = FALSE
-LEFT JOIN dim_clientes_inventario ci
-    ON ci.fecha_inicio <= dt.timestamp_completo
-    AND (ci.fecha_fin IS NULL OR ci.fecha_fin > dt.timestamp_completo)
-    AND ci.activo_bool = TRUE
-
-GROUP BY
-    dt.anio, dt.mes, dt.nombre_mes, dt.trimestre,
-    dt.dia, dt.timestamp_completo::DATE
-
-ORDER BY fecha DESC;
-
-COMMENT ON VIEW vw_saidi_saifi_diario IS
-'SAIDI/SAIFI diario base con denominador SCD Tipo 2. Fuente para MED y agregaciones.';
-
-
--- =============================================================================
--- FUNCIÓN: Cálculo del umbral MED (IEEE 1366, método 2.5 Beta)
--- =============================================================================
-
-/*
-Implementación del algoritmo estadístico de la IEEE 1366-2012, Sección 5.4:
-
-  1. Recolectar SAIDI diario para el período de referencia (todo el histórico).
-  2. Excluir días con SAIDI = 0 (sin interrupciones).
-  3. Transformación logarítmica: ln(SAIDI) para días con SAIDI > 0.
-  4. Calcular media (α) y desviación estándar poblacional (β) de los logaritmos.
-  5. Umbral T_MED = exp(α + 2.5 × β).
-  6. Días con SAIDI > T_MED se clasifican como Major Event Days.
-
-El factor 2.5 es el recomendado por IEEE para sistemas de distribución
-eléctrica. En implementaciones más avanzadas, este factor puede calibrarse
-con datos históricos de eventos conocidos.
-
-La función es STABLE (no VOLATILE): para los mismos datos de entrada,
-siempre devuelve el mismo resultado dentro de una transacción. Esto permite
-que el planificador de PostgreSQL la optimice en subconsultas.
+IMPORTANTE: esta función lee directamente de fact_interrupciones + dimensiones,
+NO de vistas que ya excluyan MED. Esto rompe la espiral de dependencia.
 */
 CREATE OR REPLACE FUNCTION fn_calcular_umbral_med()
 RETURNS NUMERIC
 LANGUAGE sql
 STABLE
 AS $$
-    WITH diario_con_interrupciones AS (
+    WITH saidi_diario_baseline AS (
         SELECT
-            saidi_diario,
-            LN(NULLIF(saidi_diario, 0) + 0.0001) AS ln_saidi
-            /*
-            Se suma 0.0001 para evitar ln(0) = -∞ en días sin interrupciones.
-            Como filtramos SAIDI > 0 abajo, esto nunca se aplica a los datos
-            usados en el cálculo estadístico. Es una defensa en profundidad
-            (defense in depth).
-            */
-        FROM vw_saidi_saifi_diario
+            dt.timestamp_completo AS fecha,
+            COALESCE(SUM(fi.duracion_minutos), 0) AS suma_duracion,
+            MAX(ci.total_clientes_servidos) AS total_clientes
+        FROM dim_tiempo dt
+        JOIN fact_interrupciones fi
+            ON fi.sk_tiempo = dt.sk_tiempo
+        LEFT JOIN LATERAL (
+            SELECT total_clientes_servidos
+            FROM dim_clientes_inventario ci
+            WHERE ci.fecha_inicio <= dt.timestamp_completo
+              AND (ci.fecha_fin IS NULL OR ci.fecha_fin > dt.timestamp_completo)
+              AND ci.activo_bool = TRUE
+            ORDER BY ci.sk_clientes DESC
+            LIMIT 1
+        ) ci ON TRUE
+        GROUP BY dt.timestamp_completo
+        HAVING MAX(ci.total_clientes_servidos) > 0
+           AND COALESCE(SUM(fi.duracion_minutos), 0) > 0
+    ),
+    con_saidi AS (
+        SELECT
+            fecha,
+            ROUND(suma_duracion / total_clientes::NUMERIC, 4) AS saidi_diario
+        FROM saidi_diario_baseline
+    ),
+    log_transform AS (
+        SELECT
+            LN(saidi_diario) AS ln_saidi
+        FROM con_saidi
         WHERE saidi_diario > 0
     ),
     estadisticas AS (
         SELECT
-            AVG(ln_saidi)                        AS alpha,
-            STDDEV_POP(ln_saidi)                 AS beta
-        FROM diario_con_interrupciones
+            AVG(ln_saidi) AS alpha,
+            STDDEV_POP(ln_saidi) AS beta
+        FROM log_transform
     )
     SELECT
         CASE
-            WHEN beta IS NULL OR beta = 0 THEN 0
-            /*
-            Si no hay suficiente variabilidad (ej. solo 1 día con interrupciones),
-            el umbral es 0. Esto significa que no se clasifica ningún día como MED,
-            lo cual es conservador y evita falsos positivos con pocos datos.
-            */
+            WHEN beta IS NULL OR beta = 0 THEN 999999999
             ELSE ROUND(EXP(alpha + 2.5 * beta)::NUMERIC, 2)
         END
     FROM estadisticas;
 $$;
 
 COMMENT ON FUNCTION fn_calcular_umbral_med() IS
-'Umbral MED (Major Event Days) según IEEE 1366 método 2.5 Beta. Dinámico.';
+'Umbral MED (IEEE 1366 método 2.5 Beta). Calculado sobre baseline completa, sin espiral de exclusión.';
 
 
 -- =============================================================================
--- VISTA: SAIDI/SAIFI diario con clasificación MED
--- =============================================================================
-
-/*
-Extiende vw_saidi_saifi_diario agregando:
-  - es_med: BOOLEAN que indica si el día supera el umbral MED.
-  - umbral_med: valor del umbral calculado para referencia.
-
-Esta vista puede importarse directamente en Power BI. El campo es_med
-permite crear un slicer/filtro para que el usuario decida si incluir o
-excluir los Major Event Days del análisis.
-*/
-CREATE OR REPLACE VIEW vw_saidi_saifi_con_med AS
-SELECT
-    d.*,
-    fn_calcular_umbral_med()                         AS umbral_med,
-    d.saidi_diario > fn_calcular_umbral_med()        AS es_med
-FROM vw_saidi_saifi_diario d
-ORDER BY d.fecha DESC;
-
-COMMENT ON VIEW vw_saidi_saifi_con_med IS
-'SAIDI/SAIFI diario con bandera MED. Usar con slicer en Power BI.';
-
-
--- =============================================================================
--- VISTA PRINCIPAL PARA POWER BI: SAIDI/SAIFI mensual con jerarquía de red
+-- VISTA: vw_med_threshold — Umbral MED y clasificación de días
 -- =============================================================================
 
 /*
-Esta es la vista principal que Power BI importa para los dashboards tácticos
-y estratégicos. Proporciona:
-
-  - Agregación mensual de SAIDI/SAIFI.
-  - Drill-down jerárquico: Subestación → Circuito → Mes.
-  - Columnas de texto para segmentación (slicers) en Power BI.
-  - Filtro de MED integrado: la vista excluye automáticamente los MED days.
-
-  ¿Por qué monthly y no diario?
-    - SAIDI/SAIFI son indicadores tácticos/estratégicos, no operacionales.
-      La granularidad mensual es el estándar en reportes regulatorios.
-    - Power BI maneja mejor tablas agregadas con < 100k filas que vistas
-      con millones de filas diarias. Si el usuario necesita drill-down a día,
-      puede usar vw_saidi_saifi_con_med como tabla secundaria.
-
-  Columna `periodo` en formato YYYY-MM:
-    - Power BI puede ordenarla cronológicamente y usarla como eje X en
-      gráficos de tendencia.
-    - El formato string YYYY-MM garantiza orden lexicográfico = orden
-      cronológico, evitando configuraciones adicionales en Power Query.
+Expone el umbral MED y permite clasificar cada día como MED o no-MED.
+Se calcula sobre la baseline completa (sin excluir MED previamente).
+Power BI puede usar esta vista como referencia para slicers de exclusión.
 */
-CREATE OR REPLACE VIEW vw_saidi_saifi_mensual AS
-WITH med_days AS (
-    -- Identificar días MED usando la función de umbral
+CREATE OR REPLACE VIEW vw_med_threshold AS
+WITH saidi_diario_completo AS (
     SELECT
-        fecha,
-        CASE WHEN saidi_diario > fn_calcular_umbral_med()
-             THEN TRUE ELSE FALSE
-        END AS es_med
-    FROM vw_saidi_saifi_diario
-    WHERE saidi_diario > 0
-),
-hechos_filtrados AS (
-    -- Excluir interrupciones ocurridas en días MED
-    SELECT
-        fi.sk_interrupcion,
-        fi.sk_tiempo,
-        fi.sk_red_electrica,
-        fi.sk_clientes,
-        fi.duracion_minutos,
-        fi.clientes_afectados
-    FROM fact_interrupciones fi
-    JOIN dim_tiempo dt ON fi.sk_tiempo = dt.sk_tiempo
-    LEFT JOIN med_days md ON md.fecha = dt.timestamp_completo::DATE
-    WHERE fi.excluido_med = FALSE
-      AND (md.es_med IS NULL OR md.es_med = FALSE)
-      /*
-      md.es_med IS NULL cubre días sin interrupciones (no están en med_days).
-      Estos no son MED, así que se incluyen (no hay nada que excluir).
-      */
+        dt.timestamp_completo AS fecha,
+        dt.anio,
+        dt.mes,
+        dt.nombre_mes,
+        COALESCE(SUM(fi.duracion_minutos), 0) AS suma_duracion,
+        MAX(ci.total_clientes_servidos) AS total_clientes,
+        COUNT(fi.sk_interrupcion) AS total_interrupciones
+    FROM dim_tiempo dt
+    JOIN fact_interrupciones fi
+        ON fi.sk_tiempo = dt.sk_tiempo
+    LEFT JOIN LATERAL (
+        SELECT total_clientes_servidos
+        FROM dim_clientes_inventario ci
+        WHERE ci.fecha_inicio <= dt.timestamp_completo
+          AND (ci.fecha_fin IS NULL OR ci.fecha_fin > dt.timestamp_completo)
+          AND ci.activo_bool = TRUE
+            ORDER BY ci.sk_clientes DESC
+        LIMIT 1
+    ) ci ON TRUE
+    GROUP BY dt.timestamp_completo, dt.anio, dt.mes, dt.nombre_mes
+    HAVING MAX(ci.total_clientes_servidos) > 0
 )
 SELECT
-    -- ==================================================================
-    -- Columnas de jerarquía de red (para drill-down en Power BI)
-    -- ==================================================================
+    fecha,
+    anio,
+    mes,
+    nombre_mes,
+    total_interrupciones,
+    suma_duracion,
+    total_clientes,
+    CASE
+        WHEN total_clientes > 0
+        THEN ROUND(suma_duracion / total_clientes::NUMERIC, 4)
+        ELSE 0
+    END AS saidi_diario,
+    fn_calcular_umbral_med() AS umbral_med,
+    CASE
+        WHEN total_clientes > 0
+             AND (suma_duracion / total_clientes::NUMERIC) > fn_calcular_umbral_med()
+        THEN TRUE
+        ELSE FALSE
+    END AS es_med
+FROM saidi_diario_completo
+WHERE total_interrupciones > 0
+ORDER BY fecha DESC;
+
+COMMENT ON VIEW vw_med_threshold IS
+'Clasificación MED de cada día. Umbral calculado sobre baseline completa (sin espiral).';
+
+
+-- =============================================================================
+-- VISTA PRINCIPAL: vw_saidi_saifi — SAIDI/SAIFI mensual con jerarquía de red
+-- =============================================================================
+
+/*
+Vista principal para Power BI. Proporciona SAIDI/SAIFI mensual con drill-down
+jerárquico por subestación, circuito y transformador.
+
+Fórmulas IEEE 1366 corregidas:
+  SAIDI = SUM(duracion_minutos) / total_clientes_servidos
+  SAIFI = SUM(clientes_afectados) / total_clientes_servidos
+
+Excluye días MED usando vw_med_threshold como filtro.
+No usa GROUPING SETS: cada fila es granularidad (subestación, circuito,
+transformador, mes). Para totales por ciudad, usar vw_tendencia_mensual.
+*/
+CREATE OR REPLACE VIEW vw_saidi_saifi AS
+WITH med_fechas AS (
+    SELECT fecha
+    FROM vw_med_threshold
+    WHERE es_med = TRUE
+)
+SELECT
     dre.subestacion,
     dre.circuito,
     dre.transformador,
-
-    -- ==================================================================
-    -- Columnas temporales (para segmentación y tendencia)
-    -- ==================================================================
     dt.anio,
     dt.mes,
     dt.nombre_mes,
     dt.trimestre,
-    -- Período en formato YYYY-MM para eje X ordenable lexicográficamente
     LPAD(dt.anio::TEXT, 4, '0') || '-' || LPAD(dt.mes::TEXT, 2, '0') AS periodo,
 
-    -- ==================================================================
-    -- Métricas agregadas mensuales
-    -- ==================================================================
-    COUNT(hf.sk_interrupcion)                                AS total_interrupciones,
-    COALESCE(SUM(hf.duracion_minutos), 0)                    AS suma_duracion_minutos,
-    COALESCE(SUM(hf.duracion_minutos * hf.clientes_afectados), 0)
-        AS suma_minutos_cliente,
-    COALESCE(SUM(hf.clientes_afectados), 0)                  AS total_clientes_afectados,
+    COUNT(fi.sk_interrupcion) AS total_interrupciones,
+    COALESCE(SUM(fi.duracion_minutos), 0) AS suma_duracion_minutos,
+    COALESCE(SUM(fi.clientes_afectados), 0) AS total_clientes_afectados,
 
-    -- Denominador: total_clientes_servidos al momento de la primera interrupción del mes
-    -- (aproximación válida: el inventario de clientes no cambia intra-mes significativamente)
-    COALESCE(MAX(ci.total_clientes_servidos), 0)             AS total_clientes_servidos,
+    COALESCE(MAX(ci.total_clientes_servidos), 0) AS total_clientes_servidos,
 
-    -- ==================================================================
-    -- SAIDI mensual (minutos de interrupción por cliente servido)
-    -- ==================================================================
     CASE
         WHEN MAX(ci.total_clientes_servidos) > 0
         THEN ROUND(
-            COALESCE(SUM(hf.duracion_minutos * hf.clientes_afectados), 0)::NUMERIC
+            COALESCE(SUM(fi.duracion_minutos), 0)::NUMERIC
             / MAX(ci.total_clientes_servidos)::NUMERIC,
             2
         )
         ELSE 0
-    END                                                      AS saidi,
+    END AS saidi,
 
-    -- ==================================================================
-    -- SAIFI mensual (interrupciones por cliente servido)
-    -- ==================================================================
     CASE
         WHEN MAX(ci.total_clientes_servidos) > 0
         THEN ROUND(
-            COUNT(hf.sk_interrupcion)::NUMERIC
+            COALESCE(SUM(fi.clientes_afectados), 0)::NUMERIC
             / MAX(ci.total_clientes_servidos)::NUMERIC,
             4
         )
         ELSE 0
-    END                                                      AS saifi,
+    END AS saifi,
 
-    -- ==================================================================
-    -- CAIDI mensual (duración promedio por interrupción)
-    -- ==================================================================
     CASE
-        WHEN COUNT(hf.sk_interrupcion) > 0
+        WHEN COUNT(fi.sk_interrupcion) > 0
         THEN ROUND(
-            COALESCE(SUM(hf.duracion_minutos), 0)::NUMERIC
-            / COUNT(hf.sk_interrupcion)::NUMERIC,
+            COALESCE(SUM(fi.duracion_minutos), 0)::NUMERIC
+            / COUNT(fi.sk_interrupcion)::NUMERIC,
             2
         )
         ELSE 0
-    END                                                      AS caidi,
+    END AS caidi,
 
-    -- ==================================================================
-    -- Metadatos de actualización
-    -- ==================================================================
-    NOW()                                                    AS fecha_consulta
+    NOW() AS fecha_consulta
 
-FROM hechos_filtrados hf
+FROM fact_interrupciones fi
 JOIN dim_tiempo dt
-    ON hf.sk_tiempo = dt.sk_tiempo
+    ON fi.sk_tiempo = dt.sk_tiempo
 JOIN dim_red_electrica dre
-    ON hf.sk_red_electrica = dre.sk_red_electrica
-LEFT JOIN dim_clientes_inventario ci
-    ON hf.sk_clientes = ci.sk_clientes
+    ON fi.sk_red_electrica = dre.sk_red_electrica
+LEFT JOIN LATERAL (
+    SELECT total_clientes_servidos
+    FROM dim_clientes_inventario ci
+    WHERE ci.fecha_inicio <= dt.timestamp_completo
+      AND (ci.fecha_fin IS NULL OR ci.fecha_fin > dt.timestamp_completo)
+      AND ci.activo_bool = TRUE
+    ORDER BY ci.sk_clientes DESC
+    LIMIT 1
+) ci ON TRUE
+LEFT JOIN med_fechas mf
+    ON mf.fecha = dt.timestamp_completo
+
+WHERE fi.excluido_med = FALSE
+  AND mf.fecha IS NULL
 
 GROUP BY
-    GROUPING SETS (
-        -- Drill-down jerárquico: Power BI puede navegar entre estos niveles
-        (dre.subestacion, dre.circuito, dre.transformador, dt.anio, dt.mes, dt.nombre_mes, dt.trimestre, periodo),
-        (dre.subestacion, dre.circuito, dt.anio, dt.mes, dt.nombre_mes, dt.trimestre, periodo),
-        (dre.subestacion, dt.anio, dt.mes, dt.nombre_mes, dt.trimestre, periodo),
-        (dt.anio, dt.mes, dt.nombre_mes, dt.trimestre, periodo)
-        /*
-        GROUPING SETS genera múltiples niveles de agregación en una sola pasada.
-        Power BI puede usar esta vista con filtros de nivel superior y el
-        query folding nativo de PostgreSQL expandirá solo el nivel necesario.
-
-        Ejemplo:
-          - Sin filtros → nivel 4 (total por mes), el más agregado.
-          - Filtro subestacion = 'SUB-01' → nivel 3.
-          - Filtro subestacion = 'SUB-01' AND circuito = 'CIR-NORTE' → nivel 2.
-          - Filtro completo hasta transformador → nivel 1.
-        */
-    )
+    dre.subestacion,
+    dre.circuito,
+    dre.transformador,
+    dt.anio, dt.mes, dt.nombre_mes, dt.trimestre, periodo
 
 ORDER BY dt.anio DESC, dt.mes DESC, dre.subestacion;
 
-COMMENT ON VIEW vw_saidi_saifi_mensual IS
-'Vista principal para Power BI. SAIDI/SAIFI/CAIDI mensual con jerarquía de red y exclusión MED.';
+COMMENT ON VIEW vw_saidi_saifi IS
+'SAIDI/SAIFI/CAIDI mensual por subestación/circuito/transformador. Sin GROUPING SETS. Excluye MED.';
 
 
 -- =============================================================================
--- VISTA COMPLEMENTARIA: Tendencia de 12 meses (rolling) para gráficos de línea
+-- VISTA: vw_tendencia_mensual — Tendencia SAIDI/SAIFI a nivel ciudad
 -- =============================================================================
 
 /*
-Power BI necesita una vista con los últimos N períodos para gráficos de
-tendencia (line charts). Esta vista siempre devuelve los últimos 24 meses
-completos, independientemente de cuándo se consulte.
-
-Se incluye una columna `periodo_orden` numérica (YYYYMM) para que Power BI
-pueda ordenar el eje X sin depender del orden lexicográfico del string.
+Tendencia mensual a nivel ciudad (sin desglose por red) para gráficos de línea.
+Usa INTERVAL nativo para el rango de últimos 24 meses, no aritmética de enteros.
+Incluye variación porcentual intermensual con LAG().
 */
-CREATE OR REPLACE VIEW vw_tendencia_12_meses AS
+CREATE OR REPLACE VIEW vw_tendencia_mensual AS
+WITH med_fechas AS (
+    SELECT fecha
+    FROM vw_med_threshold
+    WHERE es_med = TRUE
+),
+mensual_ciudad AS (
+    SELECT
+        dt.anio,
+        dt.mes,
+        dt.nombre_mes,
+        dt.trimestre,
+        LPAD(dt.anio::TEXT, 4, '0') || '-' || LPAD(dt.mes::TEXT, 2, '0') AS periodo,
+        (dt.anio * 100 + dt.mes)::INTEGER AS periodo_orden,
+        COUNT(fi.sk_interrupcion) AS total_interrupciones,
+        COALESCE(SUM(fi.clientes_afectados), 0) AS total_clientes_afectados,
+        COALESCE(SUM(fi.duracion_minutos), 0) AS suma_duracion_minutos,
+        COALESCE(MAX(ci.total_clientes_servidos), 0) AS total_clientes_servidos
+    FROM dim_tiempo dt
+    LEFT JOIN fact_interrupciones fi
+        ON fi.sk_tiempo = dt.sk_tiempo
+        AND fi.excluido_med = FALSE
+    LEFT JOIN med_fechas mf
+        ON mf.fecha = dt.timestamp_completo
+    LEFT JOIN LATERAL (
+        SELECT total_clientes_servidos
+        FROM dim_clientes_inventario ci
+        WHERE ci.fecha_inicio <= dt.timestamp_completo
+          AND (ci.fecha_fin IS NULL OR ci.fecha_fin > dt.timestamp_completo)
+          AND ci.activo_bool = TRUE
+            ORDER BY ci.sk_clientes DESC
+        LIMIT 1
+    ) ci ON TRUE
+    WHERE mf.fecha IS NULL
+    GROUP BY dt.anio, dt.mes, dt.nombre_mes, dt.trimestre
+)
 SELECT
     anio,
     mes,
     nombre_mes,
     trimestre,
     periodo,
-    (anio * 100 + mes)::INTEGER                              AS periodo_orden,
+    periodo_orden,
+    total_interrupciones,
+    total_clientes_afectados,
+    suma_duracion_minutos,
+    total_clientes_servidos,
 
-    -- Métricas a nivel ciudad (sin desglose por red)
-    SUM(total_interrupciones)                                AS total_interrupciones,
-    SUM(total_clientes_afectados)                            AS total_clientes_afectados,
+    CASE
+        WHEN total_clientes_servidos > 0
+        THEN ROUND(suma_duracion_minutos::NUMERIC / total_clientes_servidos::NUMERIC, 2)
+        ELSE 0
+    END AS saidi_ciudad,
 
-    -- SAIDI agregado a nivel ciudad
+    CASE
+        WHEN total_clientes_servidos > 0
+        THEN ROUND(total_clientes_afectados::NUMERIC / total_clientes_servidos::NUMERIC, 4)
+        ELSE 0
+    END AS saifi_ciudad,
+
     ROUND(
-        SUM(suma_minutos_cliente)::NUMERIC
-        / NULLIF(MAX(total_clientes_servidos), 0)::NUMERIC,
-        2
-    )                                                        AS saidi_ciudad,
-
-    -- SAIFI agregado a nivel ciudad
-    ROUND(
-        SUM(total_clientes_afectados)::NUMERIC
-        / NULLIF(MAX(total_clientes_servidos), 0)::NUMERIC,
-        4
-    )                                                        AS saifi_ciudad,
-
-    -- Variación porcentual respecto al mes anterior
-    ROUND(
-        (SUM(suma_minutos_cliente)::NUMERIC
-         / NULLIF(MAX(total_clientes_servidos), 0)::NUMERIC
-         - LAG(SUM(suma_minutos_cliente)::NUMERIC
-               / NULLIF(MAX(total_clientes_servidos), 0)::NUMERIC)
+        (CASE WHEN total_clientes_servidos > 0
+              THEN suma_duracion_minutos::NUMERIC / total_clientes_servidos::NUMERIC
+              ELSE 0
+         END
+         - LAG(CASE WHEN total_clientes_servidos > 0
+                    THEN suma_duracion_minutos::NUMERIC / total_clientes_servidos::NUMERIC
+                    ELSE 0
+               END)
            OVER (ORDER BY anio, mes))
-        / NULLIF(LAG(SUM(suma_minutos_cliente)::NUMERIC
-                      / NULLIF(MAX(total_clientes_servidos), 0)::NUMERIC)
+        / NULLIF(LAG(CASE WHEN total_clientes_servidos > 0
+                          THEN suma_duracion_minutos::NUMERIC / total_clientes_servidos::NUMERIC
+                          ELSE 0
+                     END)
                   OVER (ORDER BY anio, mes), 0)
         * 100,
         2
-    )                                                        AS variacion_saidi_pct
+    ) AS variacion_saidi_pct
 
-FROM vw_saidi_saifi_mensual
-WHERE (anio * 100 + mes) >= (
-    -- Últimos 24 meses desde la fecha actual
-    SELECT EXTRACT(YEAR FROM NOW())::INTEGER * 100
-         + EXTRACT(MONTH FROM NOW())::INTEGER - 24
-)
-GROUP BY anio, mes, nombre_mes, trimestre, periodo
+FROM mensual_ciudad
+WHERE TO_DATE(anio::TEXT || '-' || LPAD(mes::TEXT, 2, '0'), 'YYYY-MM')
+      >= (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '24 months')
 ORDER BY anio DESC, mes DESC;
 
-COMMENT ON VIEW vw_tendencia_12_meses IS
-'Tendencia SAIDI/SAIFI 24 meses con variación intermensual. Para gráficos de línea en Power BI.';
+COMMENT ON VIEW vw_tendencia_mensual IS
+'Tendencia SAIDI/SAIFI 24 meses a nivel ciudad. INTERVAL para rango dinámico. Para gráficos de línea.';
 
 
 -- =============================================================================
--- VISTA COMPLEMENTARIA: Ranking de subestaciones por desempeño
+-- VISTA: vw_ranking_subestaciones — Ranking dinámico sin año hardcodeado
 -- =============================================================================
 
 /*
-Dashboard táctico para identificar las subestaciones con peor desempeño.
-Ordenado por SAIDI descendente (mayor duración de interrupción = peor).
-Incluye ranking numérico y comparación contra el promedio de la ciudad.
+Ranking de subestaciones por SAIDI promedio. No hardcodea EXTRACT(YEAR FROM NOW()):
+usa los últimos 12 meses dinámicamente con INTERVAL.
+Incluye comparación contra promedio de ciudad y semáforo de desempeño.
 */
 CREATE OR REPLACE VIEW vw_ranking_subestaciones AS
-WITH promedio_ciudad AS (
-    -- Calcular el SAIDI promedio de toda la ciudad como referencia
+WITH med_fechas AS (
+    SELECT fecha
+    FROM vw_med_threshold
+    WHERE es_med = TRUE
+),
+rango_dinamico AS (
     SELECT
-        ROUND(AVG(saidi)::NUMERIC, 2) AS saidi_promedio_ciudad
-    FROM vw_saidi_saifi_mensual
-    WHERE subestacion IS NOT NULL
-      AND anio = EXTRACT(YEAR FROM NOW())::SMALLINT
+        DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '12 months' AS inicio_rango,
+        DATE_TRUNC('month', CURRENT_DATE) AS fin_rango
+),
+datos_subestacion AS (
+    SELECT
+        dre.subestacion,
+        dt.anio,
+        dt.mes,
+        LPAD(dt.anio::TEXT, 4, '0') || '-' || LPAD(dt.mes::TEXT, 2, '0') AS periodo,
+        COUNT(fi.sk_interrupcion) AS total_interrupciones,
+        COALESCE(SUM(fi.duracion_minutos), 0) AS suma_duracion,
+        COALESCE(SUM(fi.clientes_afectados), 0) AS total_clientes_afectados,
+        COALESCE(MAX(ci.total_clientes_servidos), 0) AS total_clientes_servidos
+    FROM fact_interrupciones fi
+    JOIN dim_tiempo dt
+        ON fi.sk_tiempo = dt.sk_tiempo
+    JOIN dim_red_electrica dre
+        ON fi.sk_red_electrica = dre.sk_red_electrica
+    LEFT JOIN LATERAL (
+        SELECT total_clientes_servidos
+        FROM dim_clientes_inventario ci
+        WHERE ci.fecha_inicio <= dt.timestamp_completo
+          AND (ci.fecha_fin IS NULL OR ci.fecha_fin > dt.timestamp_completo)
+          AND ci.activo_bool = TRUE
+            ORDER BY ci.sk_clientes DESC
+        LIMIT 1
+    ) ci ON TRUE
+    LEFT JOIN med_fechas mf
+        ON mf.fecha = dt.timestamp_completo
+    CROSS JOIN rango_dinamico rd
+    WHERE fi.excluido_med = FALSE
+      AND mf.fecha IS NULL
+      AND dt.timestamp_completo >= rd.inicio_rango
+      AND dt.timestamp_completo < rd.fin_rango
+    GROUP BY dre.subestacion, dt.anio, dt.mes
+),
+metricas_sub AS (
+    SELECT
+        subestacion,
+        COUNT(DISTINCT periodo) AS meses_con_datos,
+        ROUND(AVG(
+            CASE WHEN total_clientes_servidos > 0
+                 THEN suma_duracion::NUMERIC / total_clientes_servidos::NUMERIC
+                 ELSE 0
+            END
+        )::NUMERIC, 2) AS saidi_promedio,
+        ROUND(AVG(
+            CASE WHEN total_clientes_servidos > 0
+                 THEN total_clientes_afectados::NUMERIC / total_clientes_servidos::NUMERIC
+                 ELSE 0
+            END
+        )::NUMERIC, 4) AS saifi_promedio,
+        SUM(total_interrupciones) AS total_interrupciones_acum
+    FROM datos_subestacion
+    GROUP BY subestacion
+),
+promedio_ciudad AS (
+    SELECT ROUND(AVG(saidi_promedio)::NUMERIC, 2) AS saidi_promedio_ciudad
+    FROM metricas_sub
 )
 SELECT
-    ROW_NUMBER() OVER (ORDER BY SUM(sm.saidi) DESC)          AS ranking,
-    sm.subestacion,
-    COUNT(DISTINCT sm.periodo)                               AS meses_con_datos,
-    ROUND(AVG(sm.saidi)::NUMERIC, 2)                         AS saidi_promedio,
-    ROUND(AVG(sm.saifi)::NUMERIC, 4)                         AS saifi_promedio,
-    ROUND(AVG(sm.caidi)::NUMERIC, 2)                         AS caidi_promedio,
-    SUM(sm.total_interrupciones)                             AS total_interrupciones_acum,
+    ROW_NUMBER() OVER (ORDER BY ms.saidi_promedio DESC) AS ranking,
+    ms.subestacion,
+    ms.meses_con_datos,
+    ms.saidi_promedio,
+    ms.saifi_promedio,
+    ms.total_interrupciones_acum,
     pc.saidi_promedio_ciudad,
-    -- Delta: cuánto peor (o mejor) está esta subestación vs el promedio de la ciudad
-    ROUND(AVG(sm.saidi)::NUMERIC - pc.saidi_promedio_ciudad, 2) AS delta_vs_ciudad,
-    -- Clasificación cualitativa para semáforo en Power BI
+    ROUND(ms.saidi_promedio - pc.saidi_promedio_ciudad, 2) AS delta_vs_ciudad,
     CASE
-        WHEN AVG(sm.saidi) > pc.saidi_promedio_ciudad * 2.0 THEN 'CRITICO'
-        WHEN AVG(sm.saidi) > pc.saidi_promedio_ciudad * 1.5 THEN 'ALTO'
-        WHEN AVG(sm.saidi) > pc.saidi_promedio_ciudad       THEN 'MEDIO'
+        WHEN ms.saidi_promedio > pc.saidi_promedio_ciudad * 2.0 THEN 'CRITICO'
+        WHEN ms.saidi_promedio > pc.saidi_promedio_ciudad * 1.5 THEN 'ALTO'
+        WHEN ms.saidi_promedio > pc.saidi_promedio_ciudad       THEN 'MEDIO'
         ELSE 'NORMAL'
-    END                                                      AS nivel_desempeno
-
-FROM vw_saidi_saifi_mensual sm
+    END AS nivel_desempeno
+FROM metricas_sub ms
 CROSS JOIN promedio_ciudad pc
-WHERE sm.subestacion IS NOT NULL
-  AND sm.anio = EXTRACT(YEAR FROM NOW())::SMALLINT
-GROUP BY sm.subestacion, pc.saidi_promedio_ciudad
 ORDER BY ranking;
 
 COMMENT ON VIEW vw_ranking_subestaciones IS
-'Ranking de subestaciones por SAIDI. Semáforo de desempeño para Power BI.';
+'Ranking de subestaciones por SAIDI. Rango dinámico (últimos 12 meses con INTERVAL). Sin año hardcodeado.';
 
 
 -- =============================================================================
--- VISTA COMPLEMENTARIA: Heatmap de interrupciones por hora del día y día de semana
+-- VISTA: vw_interrupciones_por_criticidad — Interrupciones por nivel de criticidad
 -- =============================================================================
 
 /*
-Permite identificar patrones temporales: ¿las interrupciones ocurren más
-en hora pico (18-21h)? ¿En días hábiles o fines de semana? Esto informa
-decisiones de mantenimiento preventivo y dimensionamiento de cuadrillas.
+Agrega interrupciones por nivel de criticidad de la zona geográfica.
+Permite identificar si las zonas CRITICAS tienen más interrupciones que
+las zonas NORMAL, informando decisiones de inversión en infraestructura.
+*/
+CREATE OR REPLACE VIEW vw_interrupciones_por_criticidad AS
+WITH med_fechas AS (
+    SELECT fecha
+    FROM vw_med_threshold
+    WHERE es_med = TRUE
+)
+SELECT
+    dg.nivel_criticidad,
+    dt.anio,
+    dt.mes,
+    LPAD(dt.anio::TEXT, 4, '0') || '-' || LPAD(dt.mes::TEXT, 2, '0') AS periodo,
+    COUNT(fi.sk_interrupcion) AS total_interrupciones,
+    COALESCE(SUM(fi.duracion_minutos), 0) AS suma_duracion_minutos,
+    COALESCE(SUM(fi.clientes_afectados), 0) AS total_clientes_afectados,
+    ROUND(AVG(fi.duracion_minutos)::NUMERIC, 2) AS duracion_promedio,
+    COUNT(DISTINCT dg.sector_urbano) AS sectores_afectados
+FROM fact_interrupciones fi
+JOIN dim_tiempo dt
+    ON fi.sk_tiempo = dt.sk_tiempo
+JOIN dim_geografia_urbana dg
+    ON fi.sk_geografia_urbana = dg.sk_geografia_urbana
+LEFT JOIN med_fechas mf
+    ON mf.fecha = dt.timestamp_completo
+WHERE fi.excluido_med = FALSE
+  AND mf.fecha IS NULL
+GROUP BY dg.nivel_criticidad, dt.anio, dt.mes
+ORDER BY dt.anio DESC, dt.mes DESC,
+    CASE dg.nivel_criticidad
+        WHEN 'CRITICO' THEN 1
+        WHEN 'ALTO'    THEN 2
+        WHEN 'MEDIO'   THEN 3
+        WHEN 'NORMAL'  THEN 4
+        WHEN 'BAJO'    THEN 5
+    END;
 
-El formato matricial (hora × día_semana) es ideal para un heatmap en Power BI.
+COMMENT ON VIEW vw_interrupciones_por_criticidad IS
+'Interrupciones por nivel de criticidad geográfica. Para análisis de inversión en infraestructura.';
+
+
+-- =============================================================================
+-- VISTA COMPLEMENTARIA: Heatmap de interrupciones por hora y día de semana
+-- =============================================================================
+
+/*
+Patrón temporal: ¿las interrupciones ocurren más en hora pico (18-21h)?
+Formato matricial (hora × día_semana) para heatmap en Power BI.
+Usa timestamp_inicio de fact_interrupciones para extraer la hora.
 */
 CREATE OR REPLACE VIEW vw_heatmap_interrupciones AS
 SELECT
-    dt.hora,
+    EXTRACT(HOUR FROM fi.timestamp_inicio)::SMALLINT AS hora,
     dt.dia_semana,
     dt.dia_semana_num,
     CASE
-        WHEN dt.hora BETWEEN 6 AND 11  THEN 'Mañana'
-        WHEN dt.hora BETWEEN 12 AND 17 THEN 'Tarde'
-        WHEN dt.hora BETWEEN 18 AND 22 THEN 'Pico'
+        WHEN EXTRACT(HOUR FROM fi.timestamp_inicio) BETWEEN 6 AND 11  THEN 'Manana'
+        WHEN EXTRACT(HOUR FROM fi.timestamp_inicio) BETWEEN 12 AND 17 THEN 'Tarde'
+        WHEN EXTRACT(HOUR FROM fi.timestamp_inicio) BETWEEN 18 AND 22 THEN 'Pico'
         ELSE 'Noche'
-    END                                                      AS franja_horaria,
-    COUNT(fi.sk_interrupcion)                                AS total_interrupciones,
-    ROUND(AVG(fi.duracion_minutos)::NUMERIC, 2)              AS duracion_promedio,
-    SUM(fi.duracion_minutos)                                 AS duracion_total
+    END AS franja_horaria,
+    COUNT(fi.sk_interrupcion) AS total_interrupciones,
+    ROUND(AVG(fi.duracion_minutos)::NUMERIC, 2) AS duracion_promedio,
+    SUM(fi.duracion_minutos) AS duracion_total
 FROM fact_interrupciones fi
 JOIN dim_tiempo dt ON fi.sk_tiempo = dt.sk_tiempo
 WHERE fi.excluido_med = FALSE
-GROUP BY dt.hora, dt.dia_semana, dt.dia_semana_num, franja_horaria
-ORDER BY dt.dia_semana_num, dt.hora;
+GROUP BY
+    EXTRACT(HOUR FROM fi.timestamp_inicio)::SMALLINT,
+    dt.dia_semana, dt.dia_semana_num, franja_horaria
+ORDER BY dt.dia_semana_num, hora;
 
 COMMENT ON VIEW vw_heatmap_interrupciones IS
-'Heatmap de interrupciones por hora × día de semana. Para Power BI matrix visual.';
+'Heatmap de interrupciones por hora x dia de semana. Para Power BI matrix visual.';
 
 
 -- =============================================================================
@@ -524,34 +558,31 @@ COMMENT ON VIEW vw_heatmap_interrupciones IS
 -- =============================================================================
 
 /*
-Dashboard de calidad de datos. Muestra la evolución de eventos huérfanos
-y corruptos a lo largo del tiempo. Si esta vista muestra una tendencia
-creciente, indica un problema sistémico en la ingesta (n8n) o en los
-medidores (firmware defectuoso, pérdida de paquetes).
+Dashboard de calidad de datos. Evolución de eventos huérfanos y corruptos.
+Tendencia creciente = problema sistémico en ingesta o medidores.
 */
 CREATE OR REPLACE VIEW vw_auditoria_errores AS
 SELECT
-    DATE_TRUNC('day', fecha_deteccion)::DATE                 AS fecha,
+    DATE_TRUNC('day', fecha_deteccion)::DATE AS fecha,
     motivo_error,
-    COUNT(*)                                                 AS total_errores,
-    COUNT(DISTINCT id_medidor)                               AS medidores_afectados,
-    SUM(CASE WHEN resuelto THEN 1 ELSE 0 END)                AS resueltos,
-    SUM(CASE WHEN NOT resuelto THEN 1 ELSE 0 END)            AS pendientes
+    COUNT(*) AS total_errores,
+    COUNT(DISTINCT id_medidor) AS medidores_afectados,
+    SUM(CASE WHEN resuelto THEN 1 ELSE 0 END) AS resueltos,
+    SUM(CASE WHEN NOT resuelto THEN 1 ELSE 0 END) AS pendientes
 FROM err_telemetria
 GROUP BY DATE_TRUNC('day', fecha_deteccion)::DATE, motivo_error
 ORDER BY fecha DESC, total_errores DESC;
 
 COMMENT ON VIEW vw_auditoria_errores IS
-'Auditoría de calidad de datos. Tendencia de errores en telemetría para Power BI.';
+'Auditoría de calidad de datos. Tendencia de errores en telemetría.';
 
 
 -- =============================================================================
--- VISTA COMPLEMENTARIA: Lotes de procesamiento (monitoreo ELT)
+-- VISTA COMPLEMENTARIA: Monitoreo ELT (lotes de procesamiento)
 -- =============================================================================
 
 /*
-Dashboard operacional para el equipo de datos. Muestra la salud del pipeline
-ELT: frecuencia de ejecución, volumen procesado, tasa de errores y duración.
+Dashboard operacional: salud del pipeline ELT.
 */
 CREATE OR REPLACE VIEW vw_monitoreo_elt AS
 SELECT
@@ -565,18 +596,16 @@ SELECT
     total_transitorios,
     estado,
     duracion_segundos,
-    -- Tasa de conversión: ¿qué porcentaje de eventos staging se convierte en hechos?
     CASE
         WHEN total_eventos > 0
         THEN ROUND((total_hechos::NUMERIC / total_eventos::NUMERIC) * 100, 2)
         ELSE 0
-    END                                                      AS tasa_conversion_pct,
-    -- Tasa de errores
+    END AS tasa_conversion_pct,
     CASE
         WHEN total_eventos > 0
         THEN ROUND((total_huerfanos::NUMERIC / total_eventos::NUMERIC) * 100, 2)
         ELSE 0
-    END                                                      AS tasa_error_pct
+    END AS tasa_error_pct
 FROM ctrl_lotes_procesamiento
 ORDER BY id_lote DESC;
 
@@ -585,21 +614,12 @@ COMMENT ON VIEW vw_monitoreo_elt IS
 
 
 -- =============================================================================
--- FUNCIÓN AUXILIAR: Marcar días MED en la tabla de hechos (batch)
+-- FUNCIÓN AUXILIAR: Marcar días MED en fact_interrupciones (batch)
 -- =============================================================================
 
 /*
-Esta función actualiza el campo excluido_med en fact_interrupciones para
-todas las interrupciones que ocurrieron en días clasificados como MED.
-
-Se recomienda ejecutarla después de cada lote de reconciliación grande o
-como tarea programada semanal. Power BI leerá luego el flag excluido_med
-directamente desde la tabla de hechos sin necesidad de recalcular el umbral.
-
-Rendimiento esperado:
-  - La función aplica un UPDATE masivo con JOIN sobre la vista diaria.
-  - Con índices BRIN sobre timestamp_inicio, el filtro por fecha es O(n)
-    donde n = número de días escaneados, no O(m) donde m = total de filas.
+Actualiza excluido_med en fact_interrupciones para días clasificados como MED.
+Ejecutar después de cada lote de reconciliación o como tarea programada.
 */
 CREATE OR REPLACE FUNCTION fn_actualizar_flag_med()
 RETURNS TABLE(
@@ -614,24 +634,21 @@ DECLARE
     v_med_days  INTEGER;
     v_afectados INTEGER;
 BEGIN
-    -- Calcular el umbral actual
     v_umbral := fn_calcular_umbral_med();
 
-    -- Contar cuántos días superan el umbral
     SELECT COUNT(*) INTO v_med_days
-    FROM vw_saidi_saifi_diario
-    WHERE saidi_diario > v_umbral;
+    FROM vw_med_threshold
+    WHERE es_med = TRUE;
 
-    -- Marcar las interrupciones de esos días
     WITH med_fechas AS (
         SELECT fecha
-        FROM vw_saidi_saifi_diario
-        WHERE saidi_diario > v_umbral
+        FROM vw_med_threshold
+        WHERE es_med = TRUE
     )
     UPDATE fact_interrupciones fi
     SET excluido_med = TRUE
     FROM dim_tiempo dt
-    JOIN med_fechas mf ON mf.fecha = dt.timestamp_completo::DATE
+    JOIN med_fechas mf ON mf.fecha = dt.timestamp_completo
     WHERE fi.sk_tiempo = dt.sk_tiempo
       AND fi.excluido_med = FALSE;
 
@@ -643,31 +660,27 @@ END;
 $$;
 
 COMMENT ON FUNCTION fn_actualizar_flag_med() IS
-'Actualiza el flag excluido_med en fact_interrupciones basado en el umbral MED actual.';
+'Actualiza flag excluido_med en fact_interrupciones basado en umbral MED actual.';
 
 
 -- =============================================================================
--- RESUMEN DE LAS VISTAS DISPONIBLES PARA POWER BI
+-- RESUMEN DE VISTAS PARA POWER BI
 -- =============================================================================
 
 /*
-Importar en Power BI en este orden (las dependencias se resuelven solas):
+Orden de importación en Power BI:
 
-  1. vw_saidi_saifi_mensual       → Dashboard principal (KPI, barras, drill-down)
-  2. vw_saidi_saifi_con_med       → Tabla de detalle con slicer MED
-  3. vw_tendencia_12_meses        → Gráfico de línea (tendencia SAIDI)
-  4. vw_ranking_subestaciones     → Tabla de ranking con semáforo
-  5. vw_heatmap_interrupciones    → Matrix visual (hora × día)
-  6. vw_auditoria_errores         → Dashboard de calidad de datos
-  7. vw_monitoreo_elt             → Dashboard operacional (equipo de datos)
+  1. vw_saidi_saifi                  → Dashboard principal (KPI, barras, drill-down)
+  2. vw_med_threshold                → Tabla de referencia MED + slicer
+  3. vw_tendencia_mensual            → Gráfico de línea (tendencia SAIDI)
+  4. vw_ranking_subestaciones        → Tabla de ranking con semáforo
+  5. vw_interrupciones_por_criticidad → Análisis por zona geográfica
+  6. vw_heatmap_interrupciones       → Matrix visual (hora × día)
+  7. vw_auditoria_errores            → Dashboard de calidad de datos
+  8. vw_monitoreo_elt                → Dashboard operacional
 
-  Relaciones en Power BI:
-    - vw_saidi_saifi_mensual[periodo] → vw_tendencia_12_meses[periodo]
-    - vw_saidi_saifi_mensual[subestacion] → vw_ranking_subestaciones[subestacion]
-
-  Medidas DAX recomendadas (crear en Power BI, no en PostgreSQL):
-    - SAIDI YTD:     TOTALYTD([SAIDI], dim_tiempo[fecha])
-    - SAIFI YTD:     TOTALYTD([SAIFI], dim_tiempo[fecha])
-    - SAIDI vs Meta: [SAIDI] - [Meta SAIDI]
-    - % Variación Interanual: DIVIDE([SAIDI] - [SAIDI LY], [SAIDI LY])
+Relaciones en Power BI:
+  - vw_saidi_saifi[periodo] → vw_tendencia_mensual[periodo]
+  - vw_saidi_saifi[subestacion] → vw_ranking_subestaciones[subestacion]
+  - vw_saidi_saifi[nivel_criticidad] → vw_interrupciones_por_criticidad[nivel_criticidad]
 */
