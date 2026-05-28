@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: smart_city_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smart_city_dashboard
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      FLASK_ENV: development
+    ports:
+      - "8050:8050"
+    volumes:
+      - ./dashboard:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

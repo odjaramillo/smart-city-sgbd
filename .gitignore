@@ -20,5 +20,8 @@ Thumbs.db
 .env
 .supabase/
 
+# Docker
+pgdata/
+
 # Engram cache
 .atl/.skill-registry.cache.json
