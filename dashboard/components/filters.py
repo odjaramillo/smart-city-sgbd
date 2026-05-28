@@ -8,7 +8,6 @@ import dash_bootstrap_components as dbc
 
 
 def date_range_picker():
-    """Date range picker using dcc.DatePickerRange."""
     return dcc.DatePickerRange(
         id="date-range",
         start_date="2024-01-01",
@@ -19,15 +18,11 @@ def date_range_picker():
 
 
 def sector_dropdown(sectors=None):
-    """
-    Sector dropdown populated from dim_geografia_urbana.
-    If sectors list not provided, uses a placeholder.
-    """
-    options = []
-    if sectors is not None:
-        options = [{"label": s, "value": s} for s in sectors]
-    else:
-        options = [{"label": "Todos los sectores", "value": "ALL"}]
+    options = [{"label": "Todos los sectores", "value": "ALL"}]
+    if sectors:
+        options = [{"label": "Todos los sectores", "value": "ALL"}] + [
+            {"label": s, "value": s} for s in sectors
+        ]
 
     return dcc.Dropdown(
         id="sector-filter",
@@ -39,18 +34,19 @@ def sector_dropdown(sectors=None):
     )
 
 
-def criticality_dropdown():
-    """
-    Criticality dropdown with standard levels.
-    """
-    options = [
-        {"label": "Todos los niveles", "value": "ALL"},
-        {"label": "Crítico", "value": "CRITICO"},
-        {"label": "Alto", "value": "ALTO"},
-        {"label": "Medio", "value": "MEDIO"},
-        {"label": "Normal", "value": "NORMAL"},
-        {"label": "Bajo", "value": "BAJO"},
-    ]
+def criticality_dropdown(levels=None):
+    options = [{"label": "Todos los niveles", "value": "ALL"}]
+    if levels:
+        options += [{"label": lvl, "value": lvl} for lvl in levels]
+    else:
+        options += [
+            {"label": "Crítico", "value": "CRITICO"},
+            {"label": "Alto", "value": "ALTO"},
+            {"label": "Medio", "value": "MEDIO"},
+            {"label": "Normal", "value": "NORMAL"},
+            {"label": "Bajo", "value": "BAJO"},
+        ]
+
     return dcc.Dropdown(
         id="criticality-filter",
         options=options,
@@ -61,9 +57,6 @@ def criticality_dropdown():
 
 
 def med_toggle():
-    """
-    Checklist to exclude Major Event Days from metrics.
-    """
     return dcc.Checklist(
         id="med-toggle",
         options=[{"label": "Excluir MED", "value": "excluir_med"}],
@@ -72,50 +65,38 @@ def med_toggle():
     )
 
 
-def filters_bar(sectors=None):
-    """
-    Combines all filters in a horizontal bar.
-    Returns a dbc.Row with filter components.
-    """
+def filters_bar(sectors=None, criticality_levels=None):
     return dbc.Row(
         [
             dbc.Col(
-                dbc.FormGroup(
-                    [
-                        dbc.Label("Rango de Fechas", html_for="date-range", className="filter-label"),
-                        date_range_picker(),
-                    ]
-                ),
+                [
+                    dbc.Label("Rango de Fechas", html_for="date-range", className="filter-label"),
+                    date_range_picker(),
+                ],
                 width="auto",
                 className="filter-col",
             ),
             dbc.Col(
-                dbc.FormGroup(
-                    [
-                        dbc.Label("Sector", html_for="sector-filter", className="filter-label"),
-                        sector_dropdown(sectors),
-                    ]
-                ),
+                [
+                    dbc.Label("Sector", html_for="sector-filter", className="filter-label"),
+                    sector_dropdown(sectors),
+                ],
                 width="auto",
                 className="filter-col",
             ),
             dbc.Col(
-                dbc.FormGroup(
-                    [
-                        dbc.Label("Criticidad", html_for="criticality-filter", className="filter-label"),
-                        criticality_dropdown(),
-                    ]
-                ),
+                [
+                    dbc.Label("Criticidad", html_for="criticality-filter", className="filter-label"),
+                    criticality_dropdown(criticality_levels),
+                ],
                 width="auto",
                 className="filter-col",
             ),
             dbc.Col(
-                dbc.FormGroup(
-                    [
-                        dbc.Label("", html_for="med-toggle"),
-                        med_toggle(),
-                    ]
-                ),
+                [
+                    dbc.Label("", html_for="med-toggle"),
+                    med_toggle(),
+                ],
                 width="auto",
                 className="filter-col med-toggle-col",
             ),

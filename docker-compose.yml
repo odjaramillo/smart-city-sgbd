@@ -30,7 +30,7 @@ services:
     ports:
       - "8050:8050"
     volumes:
-      - ./dashboard:/app
+      - ./dashboard:/app/dashboard
     depends_on:
       postgres:
         condition: service_healthy

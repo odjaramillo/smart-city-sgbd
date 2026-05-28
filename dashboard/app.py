@@ -19,11 +19,7 @@ app = dash.Dash(
 server = app.server  # expose server for gunicorn deployment
 
 # Initialize cache
-cache = queries.get_cache()
-cache.init_app(app.server, config={
-    "CACHE_TYPE": "SimpleCache",
-    "CACHE_DEFAULT_TIMEOUT": 300,
-})
+queries.init_cache(app.server)
 
 # Header
 header = dbc.Navbar(

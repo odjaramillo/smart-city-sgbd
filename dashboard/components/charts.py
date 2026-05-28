@@ -103,7 +103,7 @@ def ranking_bar_chart(df):
             "Crítico": "#c0392b",
         }
         df = df.copy()
-        df["color"] = df["nivel_desempeno"].map(color_map).fill("#95a5a6")
+        df["color"] = df["nivel_desempeno"].map(color_map).fillna("#95a5a6")
 
         fig = go.Figure()
         fig.add_trace(

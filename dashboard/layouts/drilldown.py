@@ -1,6 +1,6 @@
 """
 Hierarchical drill-down layout.
-Breadcrumb: Ciudad > Subestación > Circuito > Transformador
+Breadcrumb: Ciudad > Subestacion > Circuito > Transformador
 DataTable with drill-down columns and selector dropdowns.
 """
 
@@ -10,17 +10,13 @@ from dash import dash_table
 
 
 def drilldown_breadcrumb(breadcrumb=None):
-    """
-    Breadcrumb navigation showing drill-down path.
-
-    Args:
-        breadcrumb: list of strings representing current path, e.g. ["Ciudad", "Subestación A"]
-    """
     if breadcrumb is None:
         breadcrumb = ["Ciudad"]
 
     items = []
     for i, item in enumerate(breadcrumb):
+        if item is None:
+            continue
         if i < len(breadcrumb) - 1:
             items.append(
                 dbc.BreadcrumbItem(
@@ -30,7 +26,6 @@ def drilldown_breadcrumb(breadcrumb=None):
                     id=f"breadcrumb-{i}",
                 )
             )
-            items.append(dbc.BreadcrumbItem("", className="separator"))
         else:
             items.append(
                 dbc.BreadcrumbItem(
@@ -40,18 +35,10 @@ def drilldown_breadcrumb(breadcrumb=None):
                 )
             )
 
-    return dbc.Breadcrumb(items, className="drilldown-breadcrumb", id=id)
+    return dbc.Breadcrumb(items, className="drilldown-breadcrumb", id="drilldown-breadcrumb")
 
 
 def drilldown_selectors(subestaciones=None, circuitos=None, transformadores=None):
-    """
-    Dropdown selectors for drill-down navigation.
-
-    Args:
-        subestaciones: list of subestacion values
-        circuitos: list of circuito values
-        transformadores: list of transformador values
-    """
     sub_opts = [{"label": s, "value": s} for s in (subestaciones or [])]
     circ_opts = [{"label": c, "value": c} for c in (circuitos or [])]
     trans_opts = [{"label": t, "value": t} for t in (transformadores or [])]
@@ -59,48 +46,42 @@ def drilldown_selectors(subestaciones=None, circuitos=None, transformadores=None
     return dbc.Row(
         [
             dbc.Col(
-                dbc.FormGroup(
-                    [
-                        dbc.Label("Subestación", html_for="drilldown-subestacion", className="filter-label"),
-                        dcc.Dropdown(
-                            id="drilldown-subestacion",
-                            options=sub_opts,
-                            value=None,
-                            clearable=True,
-                            placeholder="Todas",
-                        ),
-                    ]
-                ),
+                [
+                    dbc.Label("Subestación", html_for="drilldown-subestacion", className="filter-label"),
+                    dcc.Dropdown(
+                        id="drilldown-subestacion",
+                        options=sub_opts,
+                        value=None,
+                        clearable=True,
+                        placeholder="Todas",
+                    ),
+                ],
                 width=3,
             ),
             dbc.Col(
-                dbc.FormGroup(
-                    [
-                        dbc.Label("Circuito", html_for="drilldown-circuito", className="filter-label"),
-                        dcc.Dropdown(
-                            id="drilldown-circuito",
-                            options=circ_opts,
-                            value=None,
-                            clearable=True,
-                            placeholder="Todos",
-                        ),
-                    ]
-                ),
+                [
+                    dbc.Label("Circuito", html_for="drilldown-circuito", className="filter-label"),
+                    dcc.Dropdown(
+                        id="drilldown-circuito",
+                        options=circ_opts,
+                        value=None,
+                        clearable=True,
+                        placeholder="Todos",
+                    ),
+                ],
                 width=3,
             ),
             dbc.Col(
-                dbc.FormGroup(
-                    [
-                        dbc.Label("Transformador", html_for="drilldown-transformador", className="filter-label"),
-                        dcc.Dropdown(
-                            id="drilldown-transformador",
-                            options=trans_opts,
-                            value=None,
-                            clearable=True,
-                            placeholder="Todos",
-                        ),
-                    ]
-                ),
+                [
+                    dbc.Label("Transformador", html_for="drilldown-transformador", className="filter-label"),
+                    dcc.Dropdown(
+                        id="drilldown-transformador",
+                        options=trans_opts,
+                        value=None,
+                        clearable=True,
+                        placeholder="Todos",
+                    ),
+                ],
                 width=3,
             ),
         ],
@@ -109,14 +90,6 @@ def drilldown_selectors(subestaciones=None, circuitos=None, transformadores=None
 
 
 def drilldown_table(data=None, columns=None):
-    """
-    DataTable with drill-down metrics.
-    Shows SAIDI, SAIFI, CAIDI by hierarchy level.
-
-    Args:
-        data: list of dicts for table rows
-        columns: list of column definitions for DataTable
-    """
     if columns is None:
         columns = [
             {"name": "Subestación", "id": "subestacion", "type": "text"},
@@ -161,16 +134,6 @@ def drilldown_table(data=None, columns=None):
 
 
 def drilldown_section(breadcrumb=None, subestaciones=None, circuitos=None, transformadores=None, table_data=None):
-    """
-    Full drill-down section combining breadcrumb, selectors, and table.
-
-    Args:
-        breadcrumb: list for breadcrumb navigation
-        subestaciones: list of subestacion values for dropdown
-        circuitos: list of circuito values for dropdown
-        transformadores: list of transformador values for dropdown
-        table_data: list of dicts for table rows
-    """
     return html.Div(
         [
             dbc.Row(

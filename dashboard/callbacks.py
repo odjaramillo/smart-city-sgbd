@@ -3,15 +3,13 @@ Dash callbacks for the Docker Dashboard.
 Implements cross-filtering, drill-down chain, and interactive updates.
 """
 
+import logging
+
 from dash import callback, Input, Output, State, html, dash_table, callback_context
 import dash_bootstrap_components as dbc
 
 from dashboard.data import queries
 
-
-# ==============================================================================
-# KPI Update Callback
-# ==============================================================================
 
 @callback(
     Output("kpi-row", "children"),
@@ -24,13 +22,6 @@ from dashboard.data import queries
     ],
 )
 def update_kpis(start_date, end_date, sector, criticality, med_toggle):
-    """
-    Update KPI cards when any filter changes.
-    Queries vw_saidi_saifi_mensual aggregated to city level with filters.
-    Returns a dbc.Row of 4 KPI cards.
-    """
-    include_med = "excluir_med" not in med_toggle
-
     try:
         filters = {
             "start_date": start_date,
@@ -44,7 +35,6 @@ def update_kpis(start_date, end_date, sector, criticality, med_toggle):
         if df is None or df.empty:
             return _empty_kpi_row()
 
-        # Aggregate to city level
         total_interrupciones = int(df["total_interrupciones"].sum())
         weighted_saidi = (df["saidi"] * df["total_clientes_afectados"]).sum() / max(df["total_clientes_afectados"].sum(), 1)
         weighted_saifi = (df["saifi"] * df["total_clientes_afectados"]).sum() / max(df["total_clientes_afectados"].sum(), 1)
@@ -60,11 +50,11 @@ def update_kpis(start_date, end_date, sector, criticality, med_toggle):
         return _build_kpi_row(kpi_data)
 
     except Exception:
+        logging.exception("Error updating KPIs")
         return _empty_kpi_row()
 
 
 def _empty_kpi_row():
-    """Return a placeholder KPI row when no data is available."""
     return dbc.Row(
         [
             dbc.Col(_build_kpi_card("SAIDI Ciudad", "—", None, "bi bi-clock-fill"), width=3),
@@ -77,7 +67,6 @@ def _empty_kpi_row():
 
 
 def _build_kpi_row(kpi_data):
-    """Build a KPI row from data dict."""
     return dbc.Row(
         [
             dbc.Col(_build_kpi_card(
@@ -110,7 +99,6 @@ def _build_kpi_row(kpi_data):
 
 
 def _build_kpi_card(title, value, delta=None, icon="bi bi-lightning-charge-fill"):
-    """Build a single KPI card component."""
     delta_element = ""
     if delta is not None:
         delta_color = "text-success" if delta >= 0 else "text-danger"
@@ -132,10 +120,6 @@ def _build_kpi_card(title, value, delta=None, icon="bi bi-lightning-charge-fill"
     )
 
 
-# ==============================================================================
-# Trend Chart Callback
-# ==============================================================================
-
 @callback(
     Output("trend-chart", "figure"),
     [
@@ -145,10 +129,6 @@ def _build_kpi_card(title, value, delta=None, icon="bi bi-lightning-charge-fill"
     ],
 )
 def update_trend(start_date, end_date, sector):
-    """
-    Update the trend line chart when date range or sector changes.
-    Queries vw_tendencia_12_meses (no per-sector filtering in the view).
-    """
     import plotly.graph_objects as go
 
     try:
@@ -205,6 +185,7 @@ def update_trend(start_date, end_date, sector):
         return fig
 
     except Exception:
+        logging.exception("Error updating trend chart")
         fig = go.Figure()
         fig.update_layout(
             title="Tendencia SAIDI/SAIFI (error)",
@@ -214,10 +195,6 @@ def update_trend(start_date, end_date, sector):
         )
         return fig
 
-
-# ==============================================================================
-# Ranking Chart Callback
-# ==============================================================================
 
 @callback(
     Output("ranking-chart", "figure"),
@@ -229,10 +206,6 @@ def update_trend(start_date, end_date, sector):
     ],
 )
 def update_ranking(start_date, end_date, sector, criticality):
-    """
-    Update the ranking bar chart when date range or filters change.
-    Queries vw_ranking_subestaciones.
-    """
     import plotly.graph_objects as go
 
     try:
@@ -260,7 +233,7 @@ def update_ranking(start_date, end_date, sector, criticality):
             "Crítico": "#c0392b",
         }
         df = df.copy()
-        df["color"] = df["nivel_desempeno"].map(color_map).fill("#95a5a6")
+        df["color"] = df["nivel_desempeno"].map(color_map).fillna("#95a5a6")
 
         fig = go.Figure()
         fig.add_trace(
@@ -289,6 +262,7 @@ def update_ranking(start_date, end_date, sector, criticality):
         return fig
 
     except Exception:
+        logging.exception("Error updating ranking chart")
         fig = go.Figure()
         fig.update_layout(
             title="Ranking SAIDI (error)",
@@ -299,10 +273,6 @@ def update_ranking(start_date, end_date, sector, criticality):
         return fig
 
 
-# ==============================================================================
-# Heatmap Chart Callback
-# ==============================================================================
-
 @callback(
     Output("heatmap-chart", "figure"),
     [
@@ -312,14 +282,9 @@ def update_ranking(start_date, end_date, sector, criticality):
     ],
 )
 def update_heatmap(start_date, end_date, sector):
-    """
-    Update the heatmap chart when date range or sector changes.
-    Queries vw_heatmap_interrupciones.
-    """
     import plotly.graph_objects as go
 
     try:
-        # Extract year/month from date range for filtering
         filters = {}
         if start_date:
             from datetime import datetime
@@ -371,6 +336,7 @@ def update_heatmap(start_date, end_date, sector):
         return fig
 
     except Exception:
+        logging.exception("Error updating heatmap")
         fig = go.Figure()
         fig.update_layout(
             title="Mapa de Calor (error)",
@@ -380,51 +346,33 @@ def update_heatmap(start_date, end_date, sector):
         return fig
 
 
-# ==============================================================================
-# Drill-down: Populate Subestacion Dropdown
-# ==============================================================================
-
 @callback(
     Output("drilldown-subestacion", "options"),
     Input("drilldown-subestacion", "search_value"),
 )
 def populate_subestaciones(search):
-    """
-    Populate the subestacion dropdown with distinct values from dim_red_electrica.
-    Dash auto-search triggers this callback when user types in the dropdown.
-    """
     try:
         df = queries.get_distinct_subestaciones()
         options = [{"label": s, "value": s} for s in df["subestacion"].tolist()]
         return options
     except Exception:
+        logging.exception("Error populating subestaciones dropdown")
         return []
 
-
-# ==============================================================================
-# Drill-down: Populate Circuito Dropdown (based on subestacion)
-# ==============================================================================
 
 @callback(
     Output("drilldown-circuito", "options"),
     Input("drilldown-subestacion", "value"),
 )
 def populate_circuitos(subestacion):
-    """
-    Populate the circuito dropdown based on selected subestacion.
-    When subestacion changes, this callback fires and filters circuitos.
-    """
     try:
         df = queries.get_distinct_circuitos(subestacion)
         options = [{"label": c, "value": c} for c in df["circuito"].tolist()]
         return options
     except Exception:
+        logging.exception("Error populating circuitos dropdown")
         return []
 
-
-# ==============================================================================
-# Drill-down: Populate Transformador Dropdown (based on subestacion + circuito)
-# ==============================================================================
 
 @callback(
     Output("drilldown-transformador", "options"),
@@ -434,20 +382,14 @@ def populate_circuitos(subestacion):
     ],
 )
 def populate_transformadores(subestacion, circuito):
-    """
-    Populate the transformador dropdown based on selected subestacion and circuito.
-    """
     try:
         df = queries.get_distinct_transformadores(subestacion, circuito)
         options = [{"label": t, "value": t} for t in df["transformador"].tolist()]
         return options
     except Exception:
+        logging.exception("Error populating transformadores dropdown")
         return []
 
-
-# ==============================================================================
-# Drill-down: Update Table
-# ==============================================================================
 
 @callback(
     Output("drilldown-table", "data"),
@@ -461,10 +403,6 @@ def populate_transformadores(subestacion, circuito):
     ],
 )
 def update_drilldown_table(subestacion, circuito, transformador, start_date, end_date, med_toggle):
-    """
-    Update the drill-down table based on hierarchy selection and date range.
-    Queries vw_saidi_saifi_mensual filtered by network hierarchy.
-    """
     try:
         filters = {
             "start_date": start_date,
@@ -474,14 +412,12 @@ def update_drilldown_table(subestacion, circuito, transformador, start_date, end
             filters["subestacion"] = subestacion
         if circuito:
             filters["circuito"] = circuito
-        # transformador filter not in current query function — added via sub-query pattern if needed
 
         df = queries.get_saidi_saifi_mensual(filters)
 
         if df is None or df.empty:
             return []
 
-        # Build response: aggregate at the appropriate level based on what's selected
         if transformador:
             level_cols = ["subestacion", "circuito", "transformador"]
         elif circuito:
@@ -498,19 +434,15 @@ def update_drilldown_table(subestacion, circuito, transformador, start_date, end
             caidi=("caidi", "mean"),
         ).reset_index()
 
-        # Compute CAIDI if not present
         if "caidi" not in agg.columns or agg["caidi"].isna().all():
             agg["caidi"] = agg["saidi"] / agg["saifi"].replace(0, float("nan"))
 
         return agg.to_dict("records")
 
     except Exception:
+        logging.exception("Error updating drill-down table")
         return []
 
-
-# ==============================================================================
-# Drill-down: Update Breadcrumb
-# ==============================================================================
 
 @callback(
     Output("drilldown-breadcrumb", "children"),
@@ -521,41 +453,24 @@ def update_drilldown_table(subestacion, circuito, transformador, start_date, end
     ],
 )
 def update_breadcrumb(subestacion, circuito, transformador):
-    """
-    Update the breadcrumb navigation based on current drill-down selection.
-    Builds: Ciudad > [Subestación] > [Circuito] > [Transformador]
-    """
     items = [dbc.BreadcrumbItem("Ciudad", href="#", className="breadcrumb-link")]
 
     if subestacion:
-        items.append(dbc.BreadcrumbItem("", className="separator"))
         items.append(dbc.BreadcrumbItem(subestacion, href="#", className="breadcrumb-link"))
 
     if circuito:
-        items.append(dbc.BreadcrumbItem("", className="separator"))
         items.append(dbc.BreadcrumbItem(circuito, href="#", className="breadcrumb-link"))
 
     if transformador:
-        items.append(dbc.BreadcrumbItem("", className="separator"))
         items.append(dbc.BreadcrumbItem(transformador, href="#", className="breadcrumb-link"))
 
-    # Mark last item as active
     if items:
-        # Remove active from all first
         for item in items:
             item.active = False
-        # Set last non-separator as active
-        for item in reversed(items):
-            if item.className != "separator":
-                item.active = True
-                break
+        items[-1].active = True
 
     return items
 
-
-# ==============================================================================
-# Ops: Refresh ELT Table + Error Chart
-# ==============================================================================
 
 @callback(
     [Output("elt-status-table", "data"), Output("error-trend-chart", "figure")],
@@ -563,20 +478,14 @@ def update_breadcrumb(subestacion, circuito, transformador):
     prevent_initial_call=True,
 )
 def update_ops(n_clicks):
-    """
-    Update the ELT status table and error audit chart on refresh button click.
-    Queries vw_monitoreo_elt and vw_auditoria_errores.
-    """
     import plotly.graph_objects as go
 
     try:
         elt_df = queries.get_monitoreo_elt()
         error_df = queries.get_auditoria_errores()
 
-        # ELT table data
         elt_data = elt_df.to_dict("records") if elt_df is not None and not elt_df.empty else []
 
-        # Error chart figure
         if error_df is None or error_df.empty:
             fig = go.Figure()
             fig.update_layout(
@@ -613,4 +522,5 @@ def update_ops(n_clicks):
         return elt_data, fig
 
     except Exception:
+        logging.exception("Error updating ops panel")
         return [], go.Figure()
