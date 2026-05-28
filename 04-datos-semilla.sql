@@ -3,6 +3,14 @@
 -- GENERADO AUTOMÁTICAMENTE por generar_datos_semilla.py
 -- Seed: 42 | Días: 60 | Medidores: 300
 -- Fecha generación: 2026-05-26T02:21:34.955729+00:00
+--
+-- NOTAS DE COMPATIBILIDAD CON DDL v2 (rediseño-completo):
+--   - dim_geografia_urbana: UNIQUE(sector_urbano) - 8 sectores únicos ✓
+--   - dim_red_electrica: UNIQUE(id_medidor_origen, fecha_inicio) SCD2 ✓
+--     (id_medidor_origen = id_medidor para todos los registros, únicos 1-300)
+--   - dim_clientes_inventario: CHECK(total_clientes_servidos > 0) ✓
+--   - staging_eventos: sin cambios, timestamps crudos para ELT
+--   - dim_tiempo: día-level (3,650 filas), hechos almacenan timestamps crudos
 -- ==============================================================================
 
 BEGIN;

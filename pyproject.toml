@@ -1,0 +1,41 @@
+[project]
+name = "smart-city-sgbd"
+version = "0.1.0"
+description = "Smart Grid resilience analytics Data Mart with Kimball star schema"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "unit: Unit tests (no DB, no external dependencies)",
+    "integration: Integration tests (DB queries, cross-module)",
+    "slow: Tests that take >1 second",
+]
+
+[tool.coverage.run]
+source = ["dashboard"]
+omit = [
+    "dashboard/__init__.py",
+    "dashboard/app.py",
+    "dashboard/config.py",
+    "tests/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

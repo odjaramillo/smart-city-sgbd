@@ -5,6 +5,11 @@
 -- PLATAFORMA: Supabase (PostgreSQL 15+)
 --
 -- DEFENSA: Protocolo paso a paso para ejecución en vivo
+--
+-- NOTAS DE ACTUALIZACIÓN v2 (rediseño-completo):
+--   - dim_tiempo: 3,650 filas (día-level) vs 5.7M (minuto-level)
+--   - UNIQUE constraints en dim_geografia_urbana, dim_red_electrica, fact_interrupciones
+--   - CHECK constraints en dim_clientes_inventario
 -- =============================================================================
 
 /*
@@ -147,11 +152,15 @@ DECLARE
     v_count INTEGER;
 BEGIN
     -- dim_tiempo (precargada por 01-ddl-modelo-estrella.sql)
+    -- Esperado: ~3,650 filas (día-level 2020-2029 vs 5.7M minuto-level)
     SELECT COUNT(*) INTO v_count FROM dim_tiempo;
     IF v_count = 0 THEN
         RAISE EXCEPTION 'SECCIÓN 2 FALLIDA — dim_tiempo está vacía.';
     END IF;
-    RAISE NOTICE '✓ dim_tiempo: % filas (precargada).', v_count;
+    IF v_count < 3600 THEN
+        RAISE EXCEPTION 'SECCIÓN 2 FALLIDA — dim_tiempo tiene % filas, se esperaban ~3,650 (día-level).', v_count;
+    END IF;
+    RAISE NOTICE '✓ dim_tiempo: % filas (día-level 2020-2029).', v_count;
 
     -- dim_geografia_urbana (poblada por 04-datos-semilla.sql)
     SELECT COUNT(*) INTO v_count FROM dim_geografia_urbana;
@@ -567,10 +576,10 @@ END $$;
 │ PASO 1: Crear el esquema dimensional y la dimensión de tiempo                 │
 │         Archivo: 01-ddl-modelo-estrella.sql                                   │
 │         Acción:  Pegar todo el contenido en el SQL Editor de Supabase        │
-│                   y ejecutar.                                                │
-│         Tiempo:  ~30-60 segundos (la carga de dim_tiempo con ~5.7M filas     │
-│                   puede tardar 20-40s dependiendo del tier).                │
-│         Output:  CREATE TABLE / CREATE INDEX / INSERT 0 5.7M aprox.          │
+│                   y ejecutar.                                                  │
+│         Tiempo:  ~1-5 segundos (la carga de dim_tiempo con ~3,650 filas      │
+│                   día-level es muy rápida).                                   │
+│         Output:  CREATE TABLE / CREATE INDEX / INSERT 0 3650 aprox.          │
 │                                                                                │
 │ PASO 2: Crear el stored procedure de reconciliación ELT                     │
 │         Archivo: 02-sp-reconciliacion-elt.sql                                 │
