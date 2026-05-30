@@ -80,7 +80,7 @@ def filters_bar(sectors=None):
     return dbc.Row(
         [
             dbc.Col(
-                dbc.FormGroup(
+                html.Div(
                     [
                         dbc.Label("Rango de Fechas", html_for="date-range", className="filter-label"),
                         date_range_picker(),
@@ -90,7 +90,7 @@ def filters_bar(sectors=None):
                 className="filter-col",
             ),
             dbc.Col(
-                dbc.FormGroup(
+                html.Div(
                     [
                         dbc.Label("Sector", html_for="sector-filter", className="filter-label"),
                         sector_dropdown(sectors),
@@ -100,7 +100,7 @@ def filters_bar(sectors=None):
                 className="filter-col",
             ),
             dbc.Col(
-                dbc.FormGroup(
+                html.Div(
                     [
                         dbc.Label("Criticidad", html_for="criticality-filter", className="filter-label"),
                         criticality_dropdown(),
@@ -110,7 +110,7 @@ def filters_bar(sectors=None):
                 className="filter-col",
             ),
             dbc.Col(
-                dbc.FormGroup(
+                html.Div(
                     [
                         dbc.Label("", html_for="med-toggle"),
                         med_toggle(),

@@ -1,151 +1,219 @@
 /**
- * Dashboard custom styles — DARKLY theme overrides
+ * Smart City Dashboard — Premium Glassmorphic Theme
+ * Tailored HSL Palette & Responsive Modern Layout
  */
 
-/* ==================================================================
-   CSS Variables — DARKLY palette
-   ================================================================== */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
 :root {
-    --bg-primary: #1e1e1e;
-    --bg-secondary: #2d2d2d;
-    --bg-tertiary: #262626;
-    --text-primary: #e0e0e0;
-    --text-secondary: #adb5bd;
-    --accent-blue: #00b4d8;
-    --accent-red: #e74c3c;
-    --accent-green: #2ecc71;
-    --accent-yellow: #f39c12;
-    --border-color: #333333;
+    /* Theme Colors (HSL) */
+    --bg-base: #0a0b10;
+    --bg-surface: rgba(20, 22, 32, 0.65);
+    --bg-surface-hover: rgba(28, 31, 46, 0.85);
+    --border-glow: rgba(0, 229, 255, 0.15);
+    --border-standard: rgba(255, 255, 255, 0.06);
+    
+    /* Text Colors */
+    --text-primary: #f3f4f6;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+
+    /* Accent Colors */
+    --accent-cyan: #00e5ff;
+    --accent-cyan-glow: rgba(0, 229, 255, 0.4);
+    --accent-red: #ff5252;
+    --accent-red-glow: rgba(255, 82, 82, 0.4);
+    --accent-green: #00e676;
+    --accent-green-glow: rgba(0, 230, 118, 0.4);
+    --accent-amber: #ffd600;
+    --accent-amber-glow: rgba(255, 214, 0, 0.4);
 }
 
 /* ==================================================================
-   Global
+   Global Resets & Styles
    ================================================================== */
 body {
-    background-color: var(--bg-primary);
+    background-color: var(--bg-base);
+    background-image: 
+        radial-gradient(at 0% 0%, rgba(0, 229, 255, 0.05) 0px, transparent 50%),
+        radial-gradient(at 50% 0%, rgba(255, 82, 82, 0.03) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(0, 230, 118, 0.02) 0px, transparent 50%);
     color: var(--text-primary);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    padding-bottom: 3rem;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: var(--bg-base);
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
 }
 
 /* ==================================================================
-   Header
+   Header (Glassmorphic Navbar)
    ================================================================== */
 .dashboard-header {
-    border-bottom: 1px solid var(--border-color);
-    margin-bottom: 1rem;
+    background: rgba(10, 11, 16, 0.5) !important;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border-standard);
+    padding: 1.25rem 2rem;
+    margin-bottom: 2rem;
 }
 
 .dashboard-header .navbar-brand {
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--text-primary) !important;
-    letter-spacing: 0.02em;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #ffffff 0%, var(--accent-cyan) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    display: flex;
+    align-items: center;
+}
+
+.dashboard-header .navbar-brand i {
+    filter: drop-shadow(0 0 8px var(--accent-cyan-glow));
+    animation: pulse-glow 2s infinite ease-in-out;
+}
+
+@keyframes pulse-glow {
+    0%, 100% { opacity: 0.8; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.08); }
 }
 
 /* ==================================================================
    Filters Bar
    ================================================================== */
 .filters-row {
-    background-color: var(--bg-secondary);
-    padding: 1rem 1.5rem;
-    border-radius: 0.375rem;
-    margin-bottom: 1rem;
-    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-standard);
+    padding: 1.25rem;
+    border-radius: 1rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
 }
 
 .filters-bar {
     display: flex;
     flex-wrap: wrap;
-    gap: 1rem;
+    gap: 1.25rem;
     align-items: flex-end;
+}
+
+.filter-col {
+    flex: 1;
+    min-width: 200px;
 }
 
 .filter-col .filter-label {
     font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.08em;
     color: var(--text-secondary);
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.5rem;
 }
 
-.med-toggle-col {
-    display: flex;
-    align-items: flex-end;
-    padding-bottom: 0.5rem;
-}
-
-/* Dropdown override for dark theme */
-.Select-placeholder,
-.Select--single > .Select-control .Select-value,
-.Select-value-label {
-    color: var(--text-primary) !important;
-}
-
+/* Custom Dropdown Overrides */
 .Select-control {
-    background-color: var(--bg-tertiary) !important;
-    border-color: var(--border-color) !important;
+    background-color: rgba(10, 11, 16, 0.8) !important;
+    border: 1px solid var(--border-standard) !important;
+    border-radius: 0.5rem !important;
+    height: 38px !important;
+}
+
+.Select-control:hover {
+    border-color: rgba(0, 229, 255, 0.3) !important;
+}
+
+.Select-placeholder,
+.Select-value {
+    line-height: 36px !important;
     color: var(--text-primary) !important;
 }
 
 .Select-menu-outer {
-    background-color: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background-color: #141620 !important;
+    border: 1px solid var(--border-standard) !important;
+    border-radius: 0.5rem !important;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5) !important;
 }
 
 .Select-option {
-    color: var(--text-primary);
+    background-color: transparent !important;
+    color: var(--text-secondary) !important;
+    padding: 10px 15px !important;
 }
 
 .Select-option:hover,
 .Select-option.is-focused {
-    background-color: var(--bg-tertiary);
-}
-
-/* Date picker */
-.DateInput_input {
-    background-color: var(--bg-tertiary) !important;
+    background-color: var(--bg-surface-hover) !important;
     color: var(--text-primary) !important;
-    border-color: var(--border-color) !important;
-}
-
-.DateInput_input__focused {
-    border-color: var(--accent-blue) !important;
-}
-
-.DateRangePicker {
-    background-color: var(--bg-tertiary);
-    border-radius: 0.375rem;
 }
 
 /* ==================================================================
    KPI Cards
    ================================================================== */
 .kpi-row {
-    margin-bottom: 1rem;
+    margin-bottom: 2rem;
 }
 
 .kpi-card {
-    background-color: var(--bg-secondary) !important;
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    padding: 1rem;
+    background: var(--bg-surface) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-standard) !important;
+    border-radius: 1rem !important;
+    padding: 1.5rem 1rem !important;
     text-align: center;
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.4s, box-shadow 0.4s;
     height: 100%;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.kpi-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 4px;
+    background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
+    opacity: 0.5;
 }
 
 .kpi-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transform: translateY(-4px) scale(1.01);
+    border-color: var(--border-glow) !important;
+    box-shadow: 0 12px 30px rgba(0, 229, 255, 0.1);
 }
 
-.kpi-card .card-body {
-    padding: 0.75rem;
+.kpi-card.kpi-outage::before {
+    background: linear-gradient(90deg, transparent, var(--accent-red), transparent);
+}
+.kpi-card.kpi-outage:hover {
+    border-color: var(--accent-red-glow) !important;
+    box-shadow: 0 12px 30px rgba(255, 82, 82, 0.1);
 }
 
 .kpi-icon {
-    color: var(--accent-blue);
+    font-size: 1.75rem;
     margin-bottom: 0.5rem;
 }
 
@@ -153,84 +221,92 @@ body {
     font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.1em;
     color: var(--text-secondary);
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.5rem;
 }
 
 .kpi-value {
-    font-size: 1.75rem;
+    font-size: 2.25rem;
     font-weight: 700;
     color: var(--text-primary);
-    line-height: 1.1;
+    letter-spacing: -0.03em;
     margin-bottom: 0.25rem;
 }
 
 .kpi-delta {
-    font-size: 0.75rem;
+    font-size: 0.8rem;
     font-weight: 500;
 }
 
 /* ==================================================================
-   Section Layout
+   Layout Cards (Grid components)
    ================================================================== */
-.section-row {
-    margin-bottom: 1.5rem;
+.chart-col,
+.table-col {
+    background: var(--bg-surface);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-standard);
+    border-radius: 1rem;
+    padding: 1.5rem;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.2);
+    margin-bottom: 2rem;
+    transition: border-color 0.3s;
+}
+
+.chart-col:hover,
+.table-col:hover {
+    border-color: rgba(255, 255, 255, 0.1);
 }
 
 .section-title {
     font-size: 0.875rem;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-    margin-bottom: 0.75rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid var(--border-color);
+    letter-spacing: 0.1em;
+    color: var(--text-primary);
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-standard);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
-.chart-col,
-.table-col {
-    background-color: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    padding: 1rem;
-}
-
-/* ==================================================================
-   Charts
-   ================================================================== */
-.chart-panel {
-    width: 100%;
-}
-
-.js-plotly-plot .plotly .modebar {
-    background: transparent;
+.section-title i {
+    color: var(--accent-cyan);
 }
 
 /* ==================================================================
-   DataTable
+   Table styles
    ================================================================== */
-.dash-table-container {
-    border-radius: 0.5rem;
-    overflow: hidden;
+.dash-table-container .dash-spreadsheet-container {
+    background-color: transparent !important;
 }
 
-/* Drill-down breadcrumb */
+/* Breadcrumb Styling */
 .drilldown-breadcrumb {
-    background-color: transparent;
-    padding: 0;
-    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    background: rgba(255,255,255,0.02);
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-standard);
 }
 
 .drilldown-breadcrumb .breadcrumb-link {
-    color: var(--accent-blue);
+    color: var(--accent-cyan);
     font-size: 0.875rem;
     text-decoration: none;
+    font-weight: 500;
+    transition: opacity 0.2s;
 }
 
 .drilldown-breadcrumb .breadcrumb-link:hover {
-    text-decoration: underline;
+    opacity: 0.8;
 }
 
 .drilldown-breadcrumb .breadcrumb-active {
@@ -239,76 +315,40 @@ body {
     font-weight: 600;
 }
 
-.drilldown-breadcrumb .separator::before {
-    content: " › ";
-    color: var(--text-secondary);
-}
-
-/* ==================================================================
-   Heatmap Franja Breakdown
-   ================================================================== */
+/* Progress bar inside list */
 .franja-list {
-    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
 }
 
 .franja-row {
     padding: 0.5rem 0;
-    border-bottom: 1px solid var(--border-color);
-    align-items: center;
-}
-
-.franja-row:last-child {
-    border-bottom: none;
+    border-bottom: 1px solid var(--border-standard);
 }
 
 .franja-label {
     font-size: 0.875rem;
-    color: var(--text-primary);
+    color: var(--text-secondary);
 }
 
 .franja-value {
     font-size: 0.875rem;
     font-weight: 600;
-    color: var(--accent-red);
     text-align: right;
 }
 
 .franja-progress {
     height: 6px;
+    border-radius: 3px;
+    background-color: rgba(255,255,255,0.05);
 }
 
 /* ==================================================================
-   ELT Status Table — state coloring
-   ================================================================== */
-#elt-status-table {
-    border-radius: 0.5rem;
-}
-
-/* ==================================================================
-   Responsive
+   Responsive design adjustments
    ================================================================== */
 @media (max-width: 992px) {
     .kpi-card {
-        margin-bottom: 0.75rem;
-    }
-
-    .chart-col,
-    .table-col {
         margin-bottom: 1rem;
-    }
-}
-
-@media (max-width: 768px) {
-    .kpi-value {
-        font-size: 1.25rem;
-    }
-
-    .filters-bar {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .filter-col {
-        width: 100%;
     }
 }

@@ -59,7 +59,7 @@ def drilldown_selectors(subestaciones=None, circuitos=None, transformadores=None
     return dbc.Row(
         [
             dbc.Col(
-                dbc.FormGroup(
+                html.Div(
                     [
                         dbc.Label("Subestación", html_for="drilldown-subestacion", className="filter-label"),
                         dcc.Dropdown(
@@ -74,7 +74,7 @@ def drilldown_selectors(subestaciones=None, circuitos=None, transformadores=None
                 width=3,
             ),
             dbc.Col(
-                dbc.FormGroup(
+                html.Div(
                     [
                         dbc.Label("Circuito", html_for="drilldown-circuito", className="filter-label"),
                         dcc.Dropdown(
@@ -89,7 +89,7 @@ def drilldown_selectors(subestaciones=None, circuitos=None, transformadores=None
                 width=3,
             ),
             dbc.Col(
-                dbc.FormGroup(
+                html.Div(
                     [
                         dbc.Label("Transformador", html_for="drilldown-transformador", className="filter-label"),
                         dcc.Dropdown(

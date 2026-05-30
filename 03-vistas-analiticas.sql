@@ -425,9 +425,12 @@ SELECT
 
 FROM vw_saidi_saifi_mensual
 WHERE (anio * 100 + mes) >= (
-    -- Últimos 24 meses desde la fecha actual
-    SELECT EXTRACT(YEAR FROM NOW())::INTEGER * 100
-         + EXTRACT(MONTH FROM NOW())::INTEGER - 24
+    -- Últimos 24 meses calculados dinámicamente desde la fecha máxima de interrupción
+    SELECT EXTRACT(YEAR FROM val)::INTEGER * 100 + EXTRACT(MONTH FROM val)::INTEGER
+    FROM (
+        SELECT COALESCE(MAX(timestamp_inicio), NOW()) - INTERVAL '24 months' AS val 
+        FROM fact_interrupciones
+    ) q
 )
 GROUP BY anio, mes, nombre_mes, trimestre, periodo
 ORDER BY anio DESC, mes DESC;
@@ -452,7 +455,10 @@ WITH promedio_ciudad AS (
         ROUND(AVG(saidi)::NUMERIC, 2) AS saidi_promedio_ciudad
     FROM vw_saidi_saifi_mensual
     WHERE subestacion IS NOT NULL
-      AND anio = EXTRACT(YEAR FROM NOW())::SMALLINT
+      AND anio = (
+          SELECT COALESCE(EXTRACT(YEAR FROM MAX(timestamp_inicio))::SMALLINT, EXTRACT(YEAR FROM NOW())::SMALLINT)
+          FROM fact_interrupciones
+      )
 )
 SELECT
     ROW_NUMBER() OVER (ORDER BY SUM(sm.saidi) DESC)          AS ranking,
@@ -476,7 +482,10 @@ SELECT
 FROM vw_saidi_saifi_mensual sm
 CROSS JOIN promedio_ciudad pc
 WHERE sm.subestacion IS NOT NULL
-  AND sm.anio = EXTRACT(YEAR FROM NOW())::SMALLINT
+  AND sm.anio = (
+      SELECT COALESCE(EXTRACT(YEAR FROM MAX(timestamp_inicio))::SMALLINT, EXTRACT(YEAR FROM NOW())::SMALLINT)
+      FROM fact_interrupciones
+  )
 GROUP BY sm.subestacion, pc.saidi_promedio_ciudad
 ORDER BY ranking;
 
