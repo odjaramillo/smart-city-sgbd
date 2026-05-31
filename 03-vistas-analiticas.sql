@@ -296,11 +296,15 @@ permite crear un slicer/filtro para que el usuario decida si incluir o
 excluir los Major Event Days del análisis.
 */
 CREATE OR REPLACE VIEW vw_saidi_saifi_con_med AS
+-- Fix: compute umbral MED una sola vez via LATERAL.
+-- Antes: fn_calcular_umbral_med() se llamaba 2 veces por fila (STABLE = sin cacheo).
+-- Ahora: el optimizador ejecuta la función una vez y reutiliza el resultado.
 SELECT
     d.*,
-    fn_calcular_umbral_med()                         AS umbral_med,
-    d.saidi_diario > fn_calcular_umbral_med()        AS es_med
+    m.umbral_med,
+    d.saidi_diario > m.umbral_med AS es_med
 FROM vw_saidi_saifi_diario d
+CROSS JOIN LATERAL (SELECT fn_calcular_umbral_med() AS umbral_med) m
 ORDER BY d.fecha DESC;
 
 COMMENT ON VIEW vw_saidi_saifi_con_med IS
@@ -335,14 +339,17 @@ y estratégicos. Proporciona:
 */
 CREATE OR REPLACE VIEW vw_saidi_saifi_mensual AS
 WITH med_days AS (
-    -- Identificar días MED usando la función de umbral
+    -- Fix: usar DISTINCT por fecha para evitar fan-out.
+    -- Antes: med_days venía de vw_saidi_saifi_diario que agrupaba por
+    -- (fecha, categoría, severidad), multiplicando los hechos en el JOIN.
+    -- Ahora: una fila por fecha con bool_or(es_med) para que el LEFT JOIN
+    -- no infle las métricas.
     SELECT
         fecha,
-        CASE WHEN saidi_diario > fn_calcular_umbral_med()
-             THEN TRUE ELSE FALSE
-        END AS es_med
+        BOOL_OR(saidi_diario > fn_calcular_umbral_med()) AS es_med
     FROM vw_saidi_saifi_diario
     WHERE saidi_diario > 0
+    GROUP BY fecha
 ),
 hechos_filtrados AS (
     -- Excluir interrupciones ocurridas en días MED
@@ -409,11 +416,15 @@ SELECT
 
     -- ==================================================================
     -- SAIFI mensual (interrupciones por cliente servido)
+    -- Fix: SAIFI = Σ(clientes_afectados) / total_clientes_servidos.
+    -- Antes usaba COUNT(interrupciones), que coincide solo porque
+    -- clientes_afectados = 1 en el seed. Si el stress test redefine
+    -- clientes por medidor, COUNT da un número diferente de SUM.
     -- ==================================================================
     CASE
         WHEN MAX(ci.total_clientes_servidos) > 0
         THEN ROUND(
-            COUNT(hf.sk_interrupcion)::NUMERIC
+            COALESCE(SUM(hf.clientes_afectados), 0)::NUMERIC
             / MAX(ci.total_clientes_servidos)::NUMERIC,
             4
         )

@@ -47,6 +47,43 @@
 --       'OUTAGE_DUPLICADA'. Indica posible error de firmware del medidor.
 -- ==============================================================================
 
+-- ==============================================================================
+-- Fix H-6: REGISTRO AUTONOMO DE LOTES FALLIDOS
+-- ------------------------------------------------------------------------------
+-- En un bloque EXCEPTION de PL/pgSQL, Postgres revierte al savepoint del BEGIN,
+-- por lo que el INSERT del lote 'INICIADO' tambien se deshace y el posterior
+-- UPDATE ... 'FALLIDO' no afecta filas; el RAISE final revierte todo y NO queda
+-- rastro del fallo. Para auditar el fallo se escribe por una conexion autonoma
+-- (dblink), que hace COMMIT independiente y sobrevive al ROLLBACK del SP.
+-- La cadena de conexion es configurable (GUC app.dblink_conn); por defecto usa
+-- la base actual (valido en instalaciones locales y, configurando credenciales,
+-- en Supabase u otros Postgres gestionados).
+-- ==============================================================================
+CREATE EXTENSION IF NOT EXISTS dblink;
+
+CREATE OR REPLACE FUNCTION fn_log_lote_fallido(p_lote_id INTEGER, p_error TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_conn TEXT := COALESCE(
+        current_setting('app.dblink_conn', true),
+        'dbname=' || current_database()
+    );
+BEGIN
+    PERFORM dblink(v_conn, format(
+        'INSERT INTO ctrl_lotes_procesamiento
+            (id_lote, fecha_inicio, fecha_fin, estado, fecha_ejecucion)
+         VALUES (%L::int, ''-infinity''::timestamptz, ''infinity''::timestamptz,
+                 ''FALLIDO'', now())
+         ON CONFLICT (id_lote) DO UPDATE SET estado = ''FALLIDO''',
+        p_lote_id));
+EXCEPTION WHEN OTHERS THEN
+    -- Si dblink no esta configurado, no enmascarar el error original del SP.
+    RAISE WARNING 'fn_log_lote_fallido: registro autonomo no disponible (%). Configure dblink/app.dblink_conn.', SQLERRM;
+END;
+$$;
+
 CREATE OR REPLACE PROCEDURE sp_reconciliar_interrupciones(
     p_fecha_inicio TIMESTAMPTZ DEFAULT NULL,
     p_fecha_fin    TIMESTAMPTZ DEFAULT NULL
@@ -106,6 +143,12 @@ BEGIN
       Estos eventos se insertan en err_telemetria y se marcan como procesados
       para que no interfieran en el emparejamiento del BLOQUE 2.
     */
+    -- Fix H-7: el conjunto de huerfanos se MATERIALIZA en una tabla temporal.
+    -- Antes vivia en un CTE que solo era visible dentro del INSERT; el UPDATE
+    -- posterior lo referenciaba fuera de alcance y la reconciliacion fallaba
+    -- ("relation huerfanos does not exist") en cuanto habia datos.
+    DROP TABLE IF EXISTS tmp_huerfanos;
+    CREATE TEMP TABLE tmp_huerfanos AS
     WITH eventos_ord AS (
         SELECT
             id_evento,
@@ -119,21 +162,20 @@ BEGIN
           AND (p_fecha_inicio IS NULL OR timestamp_evento >= p_fecha_inicio)
           AND (p_fecha_fin    IS NULL OR timestamp_evento <= p_fecha_fin)
         WINDOW w AS (PARTITION BY id_medidor ORDER BY timestamp_evento, id_evento)
-    ),
-    huerfanos AS (
-        SELECT id_evento, id_medidor, timestamp_evento, tipo_evento,
-               CASE
-                   WHEN tipo_anterior IS NULL
-                        AND tipo_evento = 'POWER_RESTORATION'
-                        THEN 'RESTAURACION_HUERFANA: no existe OUTAGE previa para este medidor'
-                   WHEN tipo_anterior = 'POWER_RESTORATION'
-                        AND tipo_evento = 'POWER_RESTORATION'
-                        THEN 'RESTAURACION_HUERFANA: restauración consecutiva sin OUTAGE intermedia'
-               END AS motivo
-        FROM eventos_ord
-        WHERE tipo_evento = 'POWER_RESTORATION'
-          AND (tipo_anterior IS NULL OR tipo_anterior = 'POWER_RESTORATION')
     )
+    SELECT id_evento, id_medidor, timestamp_evento, tipo_evento,
+           CASE
+               WHEN tipo_anterior IS NULL
+                    AND tipo_evento = 'POWER_RESTORATION'
+                    THEN 'RESTAURACION_HUERFANA: no existe OUTAGE previa para este medidor'
+               WHEN tipo_anterior = 'POWER_RESTORATION'
+                    AND tipo_evento = 'POWER_RESTORATION'
+                    THEN 'RESTAURACION_HUERFANA: restauración consecutiva sin OUTAGE intermedia'
+           END AS motivo
+    FROM eventos_ord
+    WHERE tipo_evento = 'POWER_RESTORATION'
+      AND (tipo_anterior IS NULL OR tipo_anterior = 'POWER_RESTORATION');
+
     INSERT INTO err_telemetria (
         id_evento_origen, id_medidor, timestamp_evento, tipo_evento,
         motivo_error, id_lote_procesamiento
@@ -145,7 +187,7 @@ BEGIN
         h.tipo_evento,
         h.motivo,
         v_lote_id
-    FROM huerfanos h
+    FROM tmp_huerfanos h
     WHERE NOT EXISTS (
         -- Verificación de idempotencia: no insertar si ya existe en err_telemetria
         SELECT 1 FROM err_telemetria e
@@ -157,8 +199,9 @@ BEGIN
     -- Marcar los huérfanos como procesados para excluirlos del emparejamiento
     UPDATE staging_eventos se
     SET procesado = TRUE
-    FROM huerfanos h
+    FROM tmp_huerfanos h
     WHERE se.id_evento = h.id_evento;
+
 
     -- =====================================================================
     -- BLOQUE 2: Emparejamiento OUTAGE → RESTORATION
@@ -179,70 +222,49 @@ BEGIN
       indica corrupción de secuencia y se desvía a err_telemetria.
     */
     FOR v_rec IN
-        WITH eventos_limpios AS (
+        -- Fix H-3: emparejamiento robusto OUTAGE -> RESTORATION mediante LEAD.
+        -- Antes se agrupaba por posicion ((seq+1)/2), lo que se desincronizaba
+        -- globalmente ante secuencias corruptas (un evento extra desplazaba todos
+        -- los pares siguientes y se perdian interrupciones validas). Ahora cada
+        -- OUTAGE se empareja con su evento inmediatamente posterior, de modo que una
+        -- anomalia solo afecta su par local. Ejemplo O O R: la 1ra OUTAGE es duplicado
+        -- y la 2da empareja con R (el metodo posicional perdia ese par valido).
+        WITH eventos_ord AS (
             SELECT
                 id_evento,
                 id_medidor,
                 timestamp_evento,
                 tipo_evento,
-                ROW_NUMBER() OVER (
-                    PARTITION BY id_medidor
-                    ORDER BY timestamp_evento, id_evento
-                ) AS seq
+                LEAD(tipo_evento)      OVER w AS next_tipo,
+                LEAD(id_evento)        OVER w AS next_id,
+                LEAD(timestamp_evento) OVER w AS next_ts
             FROM staging_eventos
             WHERE procesado = FALSE
               AND (p_fecha_inicio IS NULL OR timestamp_evento >= p_fecha_inicio)
               AND (p_fecha_fin    IS NULL OR timestamp_evento <= p_fecha_fin)
-        ),
-        pares AS (
-            SELECT
-                id_medidor,
-                (seq + 1) / 2                    AS num_par,
-                COUNT(*)                         AS eventos_en_par,
-                MAX(CASE WHEN tipo_evento = 'POWER_OUTAGE'
-                    THEN id_evento END)          AS id_outage,
-                MAX(CASE WHEN tipo_evento = 'POWER_OUTAGE'
-                    THEN timestamp_evento END)   AS ts_outage,
-                MAX(CASE WHEN tipo_evento = 'POWER_OUTAGE'
-                    THEN tipo_evento END)        AS tipo_evento_outage,
-                MAX(CASE WHEN tipo_evento = 'POWER_RESTORATION'
-                    THEN id_evento END)          AS id_restoration,
-                MAX(CASE WHEN tipo_evento = 'POWER_RESTORATION'
-                    THEN timestamp_evento END)   AS ts_restoration
-            FROM eventos_limpios
-            GROUP BY id_medidor, (seq + 1) / 2
+            WINDOW w AS (PARTITION BY id_medidor ORDER BY timestamp_evento, id_evento)
         )
         SELECT
-            p.id_medidor,
-            p.num_par,
-            p.eventos_en_par,
-            p.id_outage,
-            p.ts_outage,
-            p.tipo_evento_outage,
-            p.id_restoration,
-            p.ts_restoration,
-            -- Clasificación del par
+            o.id_medidor,
+            ROW_NUMBER() OVER (PARTITION BY o.id_medidor
+                               ORDER BY o.timestamp_evento, o.id_evento) AS num_par,
+            -- eventos consumidos por esta fila (par valido = 2; outage suelto = 1)
+            CASE WHEN o.next_tipo = 'POWER_RESTORATION' THEN 2 ELSE 1 END AS eventos_en_par,
+            o.id_evento        AS id_outage,
+            o.timestamp_evento AS ts_outage,
+            o.tipo_evento      AS tipo_evento_outage,
+            CASE WHEN o.next_tipo = 'POWER_RESTORATION' THEN o.next_id END AS id_restoration,
+            CASE WHEN o.next_tipo = 'POWER_RESTORATION' THEN o.next_ts END AS ts_restoration,
+            -- Clasificación del OUTAGE según su evento siguiente
             CASE
-                WHEN p.eventos_en_par = 2
-                 AND p.id_outage IS NOT NULL
-                 AND p.id_restoration IS NOT NULL
-                    THEN 'PAR_VALIDO'
-                WHEN p.eventos_en_par = 1
-                 AND p.id_outage IS NOT NULL
-                    THEN 'OUTAGE_ABIERTO'
-                WHEN p.eventos_en_par = 1
-                 AND p.id_restoration IS NOT NULL
-                    THEN 'RESTAURACION_SOLITARIA'
-                WHEN p.eventos_en_par = 2
-                 AND p.id_outage IS NULL
-                    THEN 'DOBLE_RESTAURACION'
-                WHEN p.eventos_en_par = 2
-                 AND p.id_restoration IS NULL
-                    THEN 'DOBLE_OUTAGE'
+                WHEN o.next_tipo = 'POWER_RESTORATION' THEN 'PAR_VALIDO'
+                WHEN o.next_tipo = 'POWER_OUTAGE'      THEN 'DOBLE_OUTAGE'
+                WHEN o.next_tipo IS NULL               THEN 'OUTAGE_ABIERTO'
                 ELSE 'ERROR_DESCONOCIDO'
             END AS clasificacion
-        FROM pares p
-        ORDER BY p.id_medidor, p.num_par
+        FROM eventos_ord o
+        WHERE o.tipo_evento = 'POWER_OUTAGE'
+        ORDER BY o.id_medidor, num_par
     LOOP
         v_total_eventos := v_total_eventos + v_rec.eventos_en_par;
 
@@ -308,11 +330,25 @@ BEGIN
             ORDER BY fecha_inicio DESC
             LIMIT 1;
 
-            -- Si no hay entrada en dim_red_electrica, crear una por defecto con los datos disponibles
+            -- Si no hay entrada en dim_red_electrica, crear una por defecto con los datos disponibles.
+            -- Fix H-4: el activo por defecto se ancla a un sector "DESCONOCIDO" (get-or-create)
+            -- para que la geografia quede vinculada al medidor y no a la primera fila arbitraria.
             IF v_sk_red IS NULL THEN
+                SELECT sk_geografia_urbana INTO v_sk_geo
+                FROM dim_geografia_urbana
+                WHERE sector_urbano = 'SECTOR_DESCONOCIDO'
+                LIMIT 1;
+
+                IF v_sk_geo IS NULL THEN
+                    INSERT INTO dim_geografia_urbana (sector_urbano, distrito)
+                    VALUES ('SECTOR_DESCONOCIDO', 'DISTRITO_DESCONOCIDO')
+                    RETURNING sk_geografia_urbana INTO v_sk_geo;
+                END IF;
+
                 INSERT INTO dim_red_electrica (
                     id_medidor, id_medidor_origen, codigo_medidor,
                     transformador, circuito, subestacion,
+                    sk_geografia_urbana,
                     fecha_inicio, activo_bool
                 ) VALUES (
                     v_rec.id_medidor,
@@ -321,24 +357,32 @@ BEGIN
                     'TRANSFORMADOR_DESCONOCIDO',
                     'CIRCUITO_DESCONOCIDO',
                     'SUBESTACION_DESCONOCIDA',
+                    v_sk_geo,
                     v_rec.ts_outage - INTERVAL '1 day',
                     TRUE
                 )
                 RETURNING sk_red_electrica INTO v_sk_red;
             END IF;
 
-            -- SK de geografía: se obtiene desde dim_red_electrica vía JOIN
-            -- (En una implementación real, la geografía se vincula al medidor en su dimensión)
-            -- Para este proyecto académico, buscamos una entrada geográfica por defecto
+            -- SK de geografía: se DERIVA del activo de red resuelto (Fix H-4).
+            -- La geografia es un atributo del medidor en dim_red_electrica; esto restaura
+            -- el drill-down y los filtros por sector geografico exigidos por la rubrica.
             SELECT sk_geografia_urbana INTO v_sk_geo
-            FROM dim_geografia_urbana
-            ORDER BY sk_geografia_urbana
-            LIMIT 1;
+            FROM dim_red_electrica
+            WHERE sk_red_electrica = v_sk_red;
 
+            -- Defensa: si el activo no tuviera geografia asignada, anclar a SECTOR_DESCONOCIDO.
             IF v_sk_geo IS NULL THEN
-                INSERT INTO dim_geografia_urbana (sector_urbano, distrito)
-                VALUES ('SECTOR_DESCONOCIDO', 'DISTRITO_DESCONOCIDO')
-                RETURNING sk_geografia_urbana INTO v_sk_geo;
+                SELECT sk_geografia_urbana INTO v_sk_geo
+                FROM dim_geografia_urbana
+                WHERE sector_urbano = 'SECTOR_DESCONOCIDO'
+                LIMIT 1;
+
+                IF v_sk_geo IS NULL THEN
+                    INSERT INTO dim_geografia_urbana (sector_urbano, distrito)
+                    VALUES ('SECTOR_DESCONOCIDO', 'DISTRITO_DESCONOCIDO')
+                    RETURNING sk_geografia_urbana INTO v_sk_geo;
+                END IF;
             END IF;
 
             -- SK de clientes (denominador dinámico SCD Tipo 2): inventario activo al momento de la interrupción
@@ -525,11 +569,9 @@ BEGIN
 
 EXCEPTION
     WHEN OTHERS THEN
-        -- En caso de error, marcar el lote como fallido y relanzar la excepción
-        -- para que la transacción haga ROLLBACK completo.
-        UPDATE ctrl_lotes_procesamiento
-        SET estado = 'FALLIDO'
-        WHERE id_lote = v_lote_id;
+        -- Fix H-6: registrar el lote como FALLIDO de forma AUTONOMA (sobrevive al
+        -- ROLLBACK que provoca el RAISE) y relanzar para revertir el trabajo parcial.
+        PERFORM fn_log_lote_fallido(v_lote_id, SQLERRM);
 
         RAISE;
 END;
@@ -704,7 +746,11 @@ BEGIN
     -- Un medidor es inactivo si NO existe en dim_red_electrica con
     -- fecha_inicio <= timestamp_lectura Y (fecha_fin IS NULL OR fecha_fin > timestamp_lectura)
     -- ----------------------------------------------------------------
-    WITH medidores_inactivos AS (
+    -- Fix H-7 (telemetria): materializar el conjunto en tabla temporal. El CTE
+    -- medidores_inactivos solo existia dentro del INSERT y el UPDATE posterior lo
+    -- referenciaba fuera de alcance -> "relation medidores_inactivos does not exist".
+    DROP TABLE IF EXISTS tmp_medidores_inactivos;
+    CREATE TEMP TABLE tmp_medidores_inactivos AS
         SELECT DISTINCT
             st.id_staging,
             st.id_medidor,
@@ -723,8 +769,8 @@ BEGIN
                 AND dre.fecha_inicio <= st.timestamp_lectura
                 AND (dre.fecha_fin IS NULL OR dre.fecha_fin > st.timestamp_lectura)
                 AND dre.activo_bool = TRUE
-          )
-    )
+          );
+
     INSERT INTO err_telemetria (
         id_evento_origen, id_medidor, timestamp_evento, tipo_evento,
         tipo_error, motivo_error, detalle_tecnico, id_lote_procesamiento
@@ -743,7 +789,7 @@ BEGIN
             'bloque', 'BLOQUE_1'
         )::TEXT,
         v_lote_id
-    FROM medidores_inactivos mi
+    FROM tmp_medidores_inactivos mi
     WHERE NOT EXISTS (
         -- Idempotencia: no insertar si ya existe en err_telemetria
         SELECT 1 FROM err_telemetria e
@@ -757,7 +803,7 @@ BEGIN
     -- Marcar medidores inactivos como procesados para excluirlos del INSERT
     UPDATE staging_telemetria st
     SET procesado = TRUE
-    FROM medidores_inactivos mi
+    FROM tmp_medidores_inactivos mi
     WHERE st.id_staging = mi.id_staging;
 
     -- ----------------------------------------------------------------
@@ -828,7 +874,9 @@ BEGIN
     -- ----------------------------------------------------------------
     -- Desvío: Consumo negativo
     -- ----------------------------------------------------------------
-    WITH consumo_negativo AS (
+    -- Fix H-7 (telemetria): materializar consumo_negativo en tabla temporal.
+    DROP TABLE IF EXISTS tmp_consumo_negativo;
+    CREATE TEMP TABLE tmp_consumo_negativo AS
         SELECT DISTINCT
             st.id_staging,
             st.id_medidor,
@@ -848,8 +896,8 @@ BEGIN
                 AND dre.fecha_inicio <= st.timestamp_lectura
                 AND (dre.fecha_fin IS NULL OR dre.fecha_fin > st.timestamp_lectura)
                 AND dre.activo_bool = TRUE
-          )
-    )
+          );
+
     INSERT INTO err_telemetria (
         id_evento_origen, id_medidor, timestamp_evento, tipo_evento,
         tipo_error, motivo_error, detalle_tecnico, id_lote_procesamiento
@@ -867,7 +915,7 @@ BEGIN
             'bloque', 'BLOQUE_1'
         )::TEXT,
         v_lote_id
-    FROM consumo_negativo cn
+    FROM tmp_consumo_negativo cn
     WHERE NOT EXISTS (
         SELECT 1 FROM err_telemetria e
         WHERE e.id_evento_origen = cn.id_staging
@@ -880,7 +928,7 @@ BEGIN
     -- Marcar consumos negativos como procesados
     UPDATE staging_telemetria st
     SET procesado = TRUE
-    FROM consumo_negativo cn
+    FROM tmp_consumo_negativo cn
     WHERE st.id_staging = cn.id_staging;
 
     -- =====================================================================
@@ -904,10 +952,8 @@ BEGIN
     SELECT
         dt.sk_tiempo,
         dre.sk_red_electrica,
-        COALESCE(
-            (SELECT sk_geografia_urbana FROM dim_geografia_urbana LIMIT 1),
-            -1
-        ),                                          -- Geografía por defecto (primera disponible)
+        -- Fix H-4: geografia derivada del activo de red (no la primera fila disponible)
+        COALESCE(dre.sk_geografia_urbana, -1),
         COALESCE(dte.sk_tipo_evento, -1),            -- Unknown si no existe el tipo
         DATE_TRUNC('hour', st.timestamp_lectura),
         st.consumo_wh / 1000.0,                      -- Conversión Wh → kWh
@@ -933,7 +979,7 @@ BEGIN
       AND st.voltaje >= C_VOLTAGE_MIN
       AND st.voltaje <= C_VOLTAGE_MAX
       AND st.consumo_wh >= 0
-    ON CONFLICT (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura)) DO NOTHING;
+    ON CONFLICT (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura, 'UTC')) DO NOTHING;
 
     GET DIAGNOSTICS v_total_hechos = ROW_COUNT;
 
@@ -977,9 +1023,8 @@ BEGIN
 
 EXCEPTION
     WHEN OTHERS THEN
-        UPDATE ctrl_lotes_procesamiento
-        SET estado = 'FALLIDO'
-        WHERE id_lote = v_lote_id;
+        -- Fix H-6: registro autonomo del lote FALLIDO (ver fn_log_lote_fallido).
+        PERFORM fn_log_lote_fallido(v_lote_id, SQLERRM);
 
         RAISE;
 END;

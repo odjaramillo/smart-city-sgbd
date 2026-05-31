@@ -101,6 +101,9 @@ CREATE TABLE dim_red_electrica (
     transformador      VARCHAR(100)  NOT NULL,
     circuito           VARCHAR(100)  NOT NULL,
     subestacion        VARCHAR(100)  NOT NULL,
+    -- Fix H-4: la geografia es un atributo del activo de red (ubicacion del medidor).
+    -- Nullable a nivel DDL porque el seed la asigna por UPDATE y el ELT siempre la resuelve.
+    sk_geografia_urbana BIGINT       REFERENCES dim_geografia_urbana(sk_geografia_urbana),
     capacidad_kva      NUMERIC(10,2),
     estado_operativo   VARCHAR(30)   NOT NULL DEFAULT 'ACTIVO',
     fecha_inicio       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
@@ -138,6 +141,34 @@ CREATE TABLE dim_tipo_evento (
 
 CREATE INDEX idx_dim_tipo_evento_categoria ON dim_tipo_evento (categoria);
 CREATE INDEX idx_dim_tipo_evento_codigo ON dim_tipo_evento (codigo_evento);
+
+-- Fix H-4: indice para el JOIN red -> geografia
+CREATE INDEX idx_dim_red_geografia ON dim_red_electrica (sk_geografia_urbana);
+
+-- ===========================================================================
+-- SECUENCIA Y TABLA DE CONTROL DE LOTES
+-- Se definen ANTES de las tablas de hechos porque fact_telemetria mantiene una
+-- FK hacia ctrl_lotes_procesamiento(id_lote). (Fix H-1: referencia adelantada)
+-- ===========================================================================
+
+CREATE SEQUENCE IF NOT EXISTS seq_lote_procesamiento
+    START WITH 1
+    INCREMENT BY 1
+    NO CYCLE;
+
+CREATE TABLE ctrl_lotes_procesamiento (
+    id_lote        INTEGER PRIMARY KEY DEFAULT nextval('seq_lote_procesamiento'),
+    fecha_inicio   TIMESTAMPTZ   NOT NULL,
+    fecha_fin      TIMESTAMPTZ   NOT NULL,
+    total_eventos  INTEGER       NOT NULL DEFAULT 0,
+    total_hechos   INTEGER       NOT NULL DEFAULT 0,
+    total_huerfanos INTEGER      NOT NULL DEFAULT 0,
+    total_transitorios INTEGER   NOT NULL DEFAULT 0,
+    estado         VARCHAR(20)   NOT NULL DEFAULT 'INICIADO'
+        CHECK (estado IN ('INICIADO', 'COMPLETADO', 'FALLIDO', 'REVERTIDO')),
+    fecha_ejecucion TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    duracion_segundos NUMERIC(10,2)
+);
 
 -- ====================== TABLAS DE HECHOS ====================================
 
@@ -202,9 +233,12 @@ CREATE INDEX idx_fact_telemetria_brin_timestamp
 CREATE INDEX idx_fact_telemetria_sk_tiempo ON fact_telemetria (sk_tiempo);
 CREATE INDEX idx_fact_telemetria_sk_red ON fact_telemetria (sk_red_electrica);
 CREATE INDEX idx_fact_telemetria_sk_tipo ON fact_telemetria (sk_tipo_evento);
--- Unique: una lectura por medidor por hora
+-- Unique: una lectura por medidor por hora.
+-- Fix H-2: date_trunc(text, timestamptz) es STABLE (depende del TimeZone de sesion)
+-- y Postgres lo rechaza en indices. La variante de 3 argumentos con zona fija
+-- date_trunc(text, timestamptz, text) SI es IMMUTABLE.
 CREATE UNIQUE INDEX uq_fact_telemetria_medidor_hora
-    ON fact_telemetria (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura));
+    ON fact_telemetria (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura, 'UTC'));
 
 -- ===========================================================================
 -- ESTRATEGIA DE INDEXACION BRIN
@@ -256,33 +290,6 @@ CREATE TABLE err_telemetria (
 );
 
 CREATE INDEX idx_err_telemetria_tipo ON err_telemetria (tipo_error);
-
--- ===========================================================================
--- SECUENCIA AUXILIAR
--- ===========================================================================
-
-CREATE SEQUENCE IF NOT EXISTS seq_lote_procesamiento
-    START WITH 1
-    INCREMENT BY 1
-    NO CYCLE;
-
--- ===========================================================================
--- TABLA DE CONTROL
--- ===========================================================================
-
-CREATE TABLE ctrl_lotes_procesamiento (
-    id_lote        INTEGER PRIMARY KEY DEFAULT nextval('seq_lote_procesamiento'),
-    fecha_inicio   TIMESTAMPTZ   NOT NULL,
-    fecha_fin      TIMESTAMPTZ   NOT NULL,
-    total_eventos  INTEGER       NOT NULL DEFAULT 0,
-    total_hechos   INTEGER       NOT NULL DEFAULT 0,
-    total_huerfanos INTEGER      NOT NULL DEFAULT 0,
-    total_transitorios INTEGER   NOT NULL DEFAULT 0,
-    estado         VARCHAR(20)   NOT NULL DEFAULT 'INICIADO'
-        CHECK (estado IN ('INICIADO', 'COMPLETADO', 'FALLIDO', 'REVERTIDO')),
-    fecha_ejecucion TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    duracion_segundos NUMERIC(10,2)
-);
 
 -- ===========================================================================
 -- CARGA INICIAL DE dim_tiempo (ejecutar UNA sola vez)

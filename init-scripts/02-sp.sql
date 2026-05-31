@@ -1,1 +1,0 @@
-../02-sp-reconciliacion-elt.sql

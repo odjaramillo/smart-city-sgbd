@@ -5,7 +5,7 @@
 
 ---
 
-## 1. ¿Qué hace este sistema?
+## ¿Qué hace este sistema?
 
 El sistema ingiere eventos de **medidores inteligentes** (smart meters) y genera
 indicadores de resiliencia eléctrica:
@@ -19,6 +19,37 @@ indicadores de resiliencia eléctrica:
 Estos indicadores se calculan con **denominador dinámico** (SCD Tipo 2): el total de
 clientesservidos cambia históricamente, entonces un SAIDI de 2023 usa el inventario
 de clientes de 2023, no el actual.
+
+---
+
+## 1. Deploy en otra máquina
+
+Solo necesita Docker y ~2 minutos:
+
+```bash
+# 1. Clonar el repo
+git clone <repo-url>
+cd smart-city-sgbd
+
+# 2. Crear .env con las credenciales deseadas
+echo "POSTGRES_DB=ucab_project" > .env
+echo "POSTGRES_USER=ucab" >> .env
+echo "POSTGRES_PASSWORD=ucab123" >> .env
+
+# 3. Reset completo (levanta BD + carga esquema + povoa seed)
+bash scripts/reset-db.sh
+
+# 4. Listo. Conectar Power BI en localhost:5432
+```
+
+Connection string para Power BI / DBeaver / pgAdmin:
+```
+Host: localhost
+Port: 5432
+Database: ucab_project
+User: ucab
+Password: ucab123
+```
 
 ---
 
@@ -134,7 +165,7 @@ smart-city-sgbd/
 # Copiar variables de entorno
 cp .env.example .env  # editar POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
 
-# Levantar contenedor
+# Levantar contenedor (la primera vez inicializa la BD automáticamente)
 docker-compose up -d
 
 # Ver logs
@@ -143,18 +174,40 @@ docker-compose logs -f postgres
 
 PostgreSQL queda disponible en `localhost:5432`.
 
-### 5.2 Cargar el esquema
+### 5.2 Reset completo de la base (una línea)
+
+Para partir de una base limpia y poblada con datos de prueba:
 
 ```bash
-# Opción A: vía psql (scripts en init-scripts se ejecutan automáticamente)
-psql -h localhost -U <user> -d <db> -f 01-ddl-modelo-estrella.sql
+# Bash / Git Bash / WSL
+bash scripts/reset-db.sh
 
-# Opción B: cargar en orden manualmente
-psql -h localhost -U <user> -d <db> -f 01-ddl-modelo-estrella.sql
-psql -h localhost -U <user> -d <db> -f 02-sp-reconciliacion-elt.sql
-psql -h localhost -U <user> -d <db> -f 03-vistas-analiticas.sql
-psql -h localhost -U <user> -d <db> -f 04-datos-semilla.sql
+# Windows PowerShell
+.\scripts\reset-db.ps1
 ```
+
+Esto: destruye el volumen → levanta postgres limpio → carga 01→02→03→04 → verifica row counts.
+
+### 5.3 Cargar scripts en orden manualmente
+
+```bash
+psql -h localhost -U ucab -d ucab_project -f 01-ddl-modelo-estrella.sql
+psql -h localhost -U ucab -d ucab_project -f 02-sp-reconciliacion-elt.sql
+psql -h localhost -U ucab -d ucab_project -f 03-vistas-analiticas.sql
+psql -h localhost -U ucab -d ucab_project -f 04-datos-semilla.sql
+```
+
+> **Nota:** El script 01 tarda ~30-60s por la carga de `dim_tiempo` (~5.8M filas).
+
+### 5.4 Ejecutar smoke test
+
+Después de cargar los 4 scripts, verificar que todo funciona:
+
+```bash
+psql -h localhost -U ucab -d ucab_project -f 05-verificacion-smoke-test.sql
+```
+
+Todas las secciones deben mostrar `✓ PASADA`. Si alguna falla, el mensaje indica exactamente cuál tabla o columna tiene el problema.
 
 ### 5.3 Regenerar datos de prueba
 
@@ -168,7 +221,7 @@ psql -h localhost -U <user> -d <db> -f 04-datos-semilla.sql
 
 ---
 
-## 6. Ejecutar los stored procedures
+## 7. Ejecutar los stored procedures
 
 ### Reconciliation de interrupciones
 
@@ -204,7 +257,7 @@ SELECT * FROM fn_actualizar_flag_med();
 
 ---
 
-## 7. Integración con n8n
+## 8. Integración con n8n
 
 ### Webhook para ingestar eventos desde medidores
 
@@ -257,7 +310,7 @@ LIMIT 10;
 
 ---
 
-## 8. Integración con Power BI
+## 9. Integración con Power BI
 
 ### Importar vistas (en este orden)
 
@@ -303,7 +356,7 @@ SAIFI YTD = TOTALYTD([SAIFI], dim_tiempo[fecha])
 
 ---
 
-## 9. Pipeline de datos (flujo completo)
+## 10. Pipeline de datos (flujo completo)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -356,7 +409,7 @@ SAIFI YTD = TOTALYTD([SAIFI], dim_tiempo[fecha])
 
 ---
 
-## 10. Indicadores clave (KPIs) y umbrales
+## 11. Indicadores clave (KPIs) y umbrales
 
 | KPI | Descripción | Umbral/normal |
 |-----|-------------|---------------|
@@ -368,7 +421,7 @@ SAIFI YTD = TOTALYTD([SAIFI], dim_tiempo[fecha])
 
 ---
 
-## 11. Convenciones de equipo
+## 12. Convenciones de equipo
 
 ### Ramas y PRs
 
@@ -393,7 +446,7 @@ docs(readme): agregar sección de integración n8n
 
 ---
 
-## 12. Comandos útiles
+## 13. Comandos útiles
 
 ```bash
 # Ver logs del contenedor
@@ -421,7 +474,7 @@ psql -h localhost -U <user> -d <db> -f 04-datos-semilla.sql
 
 ---
 
-## 13. Glosario
+## 14. Glosario
 
 | Término | Significado |
 |---------|-------------|
