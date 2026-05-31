@@ -1,84 +1,70 @@
 -- Active: 1779816248964@@192.168.1.48@5432@ucab_project
 -- ==============================================================================
--- PROYECTO: Arquitectura Analítica de Resiliencia para Smart City (Smart Grid)
--- MATERIA:  Gestión de Datos — Prof. Armen Djenanian
--- FASE 1:   Modelado Dimensional (Metodología Kimball) + Estrategia de Indexación
+-- PROYECTO: Arquitectura Analitica de Resiliencia para Smart City (Smart Grid)
+-- MATERIA:  Gestion de Datos -- Prof. Armen Djenanian
+-- FASE 1:   Modelado Dimensional (Kimball) + Estrategia de Indexacion
 -- PLATAFORMA: Supabase (PostgreSQL 15+)
--- SELECT count(*) FROM dim_tiempo
--- NOTAS DE ARQUITECTURA (embebidas como comentarios):
---   - Modelo en Estrella clásico con una única tabla de hechos atómica y cuatro
---     dimensiones desnormworkspacealizadas. Se eligió Estrella sobre Copo de Nieve porque
---     el perfil de carga es 95 % lectura analítica (Power BI) y 5 % escritura ELT.
---     Cada JOIN extra en un Copo de Nieve penaliza el rendimiento de escaneo
---     secuencial sobre fact_interrupciones sin beneficio compensatorio.
---   - Las claves sustitutas (Surrogate Keys) son BIGINT GENERATED ALWAYS AS
---     IDENTITY. Esto desacopla el Data Mart de los IDs operacionales de n8n y
---     permite manejar merges, reasignaciones de medidores y cambios de topología
---     sin romper la integridad referencial de la tabla de hechos.
---   - Índices BRIN (Block Range Index) sobre columnas TIMESTAMPTZ de la tabla de
---     hechos: PostgreSQL almacena las filas en orden de inserción, y dado que el
---     ELT procesa los eventos cronológicamente, la correlación física entre el
---     orden de almacenamiento y timestamp_inicio es altísima. BRIN aprovecha
---     exactamente esta propiedad, ocupando ~1000× menos espacio que un B-Tree
---     equivalente y ofreciendo un rendimiento de filtrado por rango casi idéntico
---     para consultas analíticas que barren grandes ventanas temporales.
---   - dim_clientes_inventario se implementa como SCD Tipo 2 para resolver el
---     problema del denominador dinámico: el total de clientes servidos varía en
---     el tiempo (altas/bajas de servicio, nuevas urbanizaciones). Sin SCD Tipo 2,
---     un SAIDI calculado con el total de clientes actual distorsionaría el
---     indicador histórico. Cada snapshot es válido en un rango [fecha_inicio,
---     fecha_fin) y la condición activo_bool = TRUE identifica el registro vigente.
 -- ==============================================================================
 
 -- --------------------------------------------------------------------------
--- ESQUEMA: staging (capa de aterrizaje crudo — poblada por n8n)
+-- ESQUEMA: staging (capa de aterrizaje crudo -- poblada por n8n)
 -- --------------------------------------------------------------------------
 
 /*
-Justificación del staging atómico:
-  n8n escribe en staging_eventos sin lógica de negocio. Esto es intencional:
-  - Desacopla la ingesta (EL) de la transformación (T). Si n8n falla, el Data
-    Mart no se corrompe; solo deja de recibir eventos nuevos.
-  - Permite reprocesar históricos desde staging sin depender de la fuente externa.
-  - El campo `procesado` actúa como marca de agua para el ELT batch.
+Staging Eventos: CHECK expandido para incluir POWER_OUTAGE, POWER_RESTORATION,
+VOLTAGE_SPIKE, VOLTAGE_SAG, HEARTBEAT, UNKNOWN. Alineado con dim_tipo_evento.
 */
 CREATE TABLE IF NOT EXISTS staging_eventos (
     id_evento        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     id_medidor       BIGINT        NOT NULL,
     timestamp_evento TIMESTAMPTZ   NOT NULL,
-    tipo_evento      VARCHAR(20)   NOT NULL
-        CHECK (tipo_evento IN ('POWER_OUTAGE', 'POWER_RESTORATION')),
+    tipo_evento      VARCHAR(50)   NOT NULL
+        CHECK (tipo_evento IN (
+            'POWER_OUTAGE', 'POWER_RESTORATION',
+            'VOLTAGE_SPIKE', 'VOLTAGE_SAG',
+            'HEARTBEAT', 'UNKNOWN'
+        )),
     procesado        BOOLEAN       NOT NULL DEFAULT FALSE,
     fecha_carga      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
--- Índice compuesto para la consulta de reconciliación: filtra por procesado
--- y ordena por medidor + timestamp para la función de ventana LEAD/LAG.
 CREATE INDEX IF NOT EXISTS idx_staging_procesado_medidor_ts
     ON staging_eventos (procesado, id_medidor, timestamp_evento)
     WHERE procesado = FALSE;
 
 COMMENT ON TABLE staging_eventos IS
-'Telemetría cruda desde n8n. Sin transformación. Punto de entrada del pipeline ELT.';
+'Telemetria cruda de interrupciones desde n8n. Punto de entrada del pipeline ELT.';
 
+/*
+Staging Telemtria: Landing zone para lecturas horarias de consumo/voltaje.
+Almacena consumo en Wh (raw); la conversion a kWh ocurre en el SP.
+*/
+CREATE TABLE staging_telemetria (
+    id_staging           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id_medidor           BIGINT        NOT NULL,
+    timestamp_lectura    TIMESTAMPTZ   NOT NULL,
+    consumo_wh           NUMERIC(12,2) NOT NULL CHECK (consumo_wh >= 0),
+    voltaje              NUMERIC(8,2)  NOT NULL CHECK (voltaje >= 0 AND voltaje <= 1000),
+    tipo_lectura         VARCHAR(30)   NOT NULL DEFAULT 'LECTURA_PERIODICA'
+        CHECK (tipo_lectura IN ('LECTURA_PERIODICA', 'LECTURA_EVENTO', 'HEARTBEAT')),
+    procesado            BOOLEAN       NOT NULL DEFAULT FALSE,
+    fecha_carga          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    id_lote_procesamiento BIGINT
+);
+
+CREATE INDEX idx_staging_telemetria_procesado
+    ON staging_telemetria (procesado, id_medidor, timestamp_lectura)
+    WHERE procesado = FALSE;
+
+COMMENT ON TABLE staging_telemetria IS
+'Landing zone para lecturas periodicas de consumo/voltaje.';
 
 -- --------------------------------------------------------------------------
--- ESQUEMA: dwh (Data Warehouse — Modelo en Estrella)
+-- ESQUEMA: dwh (Data Warehouse -- Modelo en Estrella / Constelacion)
 -- --------------------------------------------------------------------------
 
 -- ========================== DIMENSIONES ====================================
 
-/*
-Dimensión de Tiempo (dim_tiempo)
-  Granularidad: 1 minuto. Esto es necesario porque las interrupciones se miden
-  en minutos (IEEE 1366 exige precisión al minuto para el filtro de 5 minutos).
-  La jerarquía año → trimestre → mes → día permite drill-down en Power BI sin
-  cálculos en tiempo de consulta.
-
-  Estrategia de carga: se precarga masivamente una sola vez con generate_series.
-  No se actualiza incrementalmente porque el rango de fechas del proyecto es
-  acotado. Para un data mart de producción se usaría un cron trimestral.
-*/
 CREATE TABLE dim_tiempo (
     sk_tiempo          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     timestamp_completo TIMESTAMPTZ   NOT NULL UNIQUE,
@@ -96,19 +82,6 @@ CREATE TABLE dim_tiempo (
     es_feriado         BOOLEAN       NOT NULL DEFAULT FALSE
 );
 
-COMMENT ON TABLE dim_tiempo IS
-'Dimensión temporal a granularidad de minuto. Jerarquía: Año → Trimestre → Mes → Día.';
-
-/*
-Dimensión Geografía Urbana (dim_geografia_urbana)
-  Desnormalizada intencionalmente: sector, distrito y coordenadas viven en una
-  sola tabla. Esto evita un JOIN adicional con una tabla de distritos que solo
-  aportaría un nombre y una clave foránea. En un modelo estrella puro, las
-  dimensiones deben ser "anchas y chatas" (wide & shallow) para minimizar JOINs.
-
-  El campo `nivel_criticidad` permite filtrar el dashboard por zonas de alto
-  riesgo (ej. hospitales, centros de datos, estaciones de bomberos).
-*/
 CREATE TABLE dim_geografia_urbana (
     sk_geografia_urbana BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     sector_urbano     VARCHAR(100)  NOT NULL,
@@ -120,22 +93,6 @@ CREATE TABLE dim_geografia_urbana (
     fecha_actualizacion TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-COMMENT ON TABLE dim_geografia_urbana IS
-'Dimensión geográfica desnormalizada. Sector → Distrito con coordenadas y criticidad.';
-
-/*
-Dimensión Red Eléctrica (dim_red_electrica)
-  Jerarquía explícita en texto plano: Subestación → Circuito → Transformador → Medidor.
-  Cada nivel se almacena como columna independiente (no como self-referencing FK)
-  para eliminar JOINs recursivos. En Power BI, los filtros de drill-down se
-  implementan nativamente sobre columnas de texto sin necesidad de navegar
-  árboles de jerarquía.
-
-  `capacidad_kva` y `estado_operativo` son atributos Slowly Changing: cuando un
-  transformador se reemplaza o degrada, se inserta una nueva fila con nueva
-  surrogate key. La tabla de hechos referencia la SK que estaba vigente en el
-  momento de la interrupción.
-*/
 CREATE TABLE dim_red_electrica (
     sk_red_electrica   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     id_medidor         BIGINT        NOT NULL,
@@ -152,23 +109,6 @@ CREATE TABLE dim_red_electrica (
     fecha_actualizacion TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-COMMENT ON TABLE dim_red_electrica IS
-'Jerarquía de red desnormalizada: Subestación → Circuito → Transformador → Medidor. SCD Tipo 2.';
-
-/*
-Dimensión de Clientes — Inventario Histórico (dim_clientes_inventario)
-  SCD Tipo 2 puro. Cada snapshot del total de clientes servidos queda registrado
-  con un rango de vigencia [fecha_inicio, fecha_fin). Esto resuelve el problema
-  del "denominador dinámico" para SAIDI/SAIFI: cuando se calcula el indicador
-  para una fecha histórica, la vista analítica hace JOIN con la fila del
-  inventario que estaba activa en ese momento exacto.
-
-  Ejemplo:
-    - 2024-01-01: 10,000 clientes → fila A (activo)
-    - 2024-06-15: 12,500 clientes → fila A cerrada (fecha_fin = 2024-06-15),
-                  fila B abierta (fecha_inicio = 2024-06-15)
-    Un SAIDI del 2024-03-10 usará 10,000; uno del 2024-08-20 usará 12,500.
-*/
 CREATE TABLE dim_clientes_inventario (
     sk_clientes           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     total_clientes_servidos INTEGER     NOT NULL,
@@ -180,24 +120,30 @@ CREATE TABLE dim_clientes_inventario (
     CONSTRAINT chk_fechas_scd2 CHECK (fecha_fin IS NULL OR fecha_fin > fecha_inicio)
 );
 
-COMMENT ON TABLE dim_clientes_inventario IS
-'SCD Tipo 2: inventario histórico de clientes. Denominador dinámico para SAIDI/SAIFI.';
+/*
+Dim Tipo Evento (Stress Test Catalog):
+La fila con sk_tipo_evento = -1 es obligatoria y se inserta en 04-datos-semilla.sql.
+*/
+CREATE TABLE dim_tipo_evento (
+    sk_tipo_evento        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    codigo_evento         VARCHAR(50)  NOT NULL UNIQUE,
+    categoria             VARCHAR(30)  NOT NULL,
+    severidad             VARCHAR(20)  NOT NULL
+        CHECK (severidad IN ('BAJA', 'MEDIA', 'ALTA', 'CRITICA', 'DESCONOCIDA')),
+    es_critico            BOOLEAN      NOT NULL DEFAULT FALSE,
+    descripcion           TEXT,
+    regla_vigencia_desde  TIMESTAMPTZ,
+    regla_vigencia_hasta  TIMESTAMPTZ
+);
 
+CREATE INDEX idx_dim_tipo_evento_categoria ON dim_tipo_evento (categoria);
+CREATE INDEX idx_dim_tipo_evento_codigo ON dim_tipo_evento (codigo_evento);
 
--- ====================== TABLA DE HECHOS ====================================
+-- ====================== TABLAS DE HECHOS ====================================
 
 /*
-Tabla de Hechos: fact_interrupciones
-  Grano: un evento de interrupción consolidado por medidor (par OUTAGE→RESTORATION).
-  Métricas: duracion_minutos (aditiva), clientes_afectados (semi-aditiva).
-  Claves sustitutas: referencian las SK de las dimensiones vigentes al momento
-  de la interrupción (no la versión actual). Esto es crítico: si un medidor
-  cambió de transformador después de una falla, la interrupción debe reportarse
-  bajo la topología histórica, no la actual.
-
-  id_lote_procesamiento: trazabilidad. Permite auditoría inversa: dado un lote,
-  encontrar todos los hechos generados y, si es necesario, anularlos sin afectar
-  otros lotes (idempotencia a nivel de batch).
+Fact Interrupciones: NUEVA columna sk_tipo_evento para filtrado SAIDI/SAIFI
+por severidad/categoria. Valor por defecto -1 (Unknown).
 */
 CREATE TABLE fact_interrupciones (
     sk_interrupcion        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -205,6 +151,8 @@ CREATE TABLE fact_interrupciones (
     sk_red_electrica       BIGINT        NOT NULL,
     sk_geografia_urbana    BIGINT        NOT NULL,
     sk_clientes            BIGINT        NOT NULL,
+    sk_tipo_evento         BIGINT        NOT NULL DEFAULT -1
+        REFERENCES dim_tipo_evento(sk_tipo_evento) ON DELETE SET DEFAULT,
     id_medidor             BIGINT        NOT NULL,
     timestamp_inicio       TIMESTAMPTZ   NOT NULL,
     timestamp_fin          TIMESTAMPTZ,
@@ -215,7 +163,6 @@ CREATE TABLE fact_interrupciones (
     excluido_med           BOOLEAN       NOT NULL DEFAULT FALSE,
     fecha_procesamiento    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
 
-    -- Restricciones de integridad referencial
     CONSTRAINT fk_fact_tiempo
         FOREIGN KEY (sk_tiempo) REFERENCES dim_tiempo(sk_tiempo),
     CONSTRAINT fk_fact_red_electrica
@@ -225,51 +172,44 @@ CREATE TABLE fact_interrupciones (
     CONSTRAINT fk_fact_clientes
         FOREIGN KEY (sk_clientes) REFERENCES dim_clientes_inventario(sk_clientes),
 
-    -- Regla de negocio: timestamp_fin debe ser posterior a timestamp_inicio
     CONSTRAINT chk_fechas_interrupcion
         CHECK (timestamp_fin IS NULL OR timestamp_fin > timestamp_inicio)
 );
 
-COMMENT ON TABLE fact_interrupciones IS
-'Hechos atómicos de interrupciones. Grano: un evento OUTAGE→RESTORATION por medidor.';
-
-
--- ===========================================================================
--- ESTRATEGIA DE INDEXACIÓN BRIN (Block Range Index)
--- ===========================================================================
-
 /*
-Justificación de BRIN sobre B-Tree para la tabla de hechos:
-
-  1. Correlación física: el ELT procesa eventos en orden cronológico, y
-     PostgreSQL inserta las filas secuencialmente. El timestamp_inicio de las
-     filas contiguas está dentro del mismo bloque o bloques adyacentes.
-     BRIN explota esta correlación: almacena solo el valor mínimo y máximo
-     por cada rango de bloques (por defecto 128 páginas = 1 MB).
-
-  2. Tamaño: un índice B-Tree sobre 10 millones de filas con TIMESTAMPTZ ocupa
-     ~250-400 MB. Un índice BRIN equivalente ocupa ~50-100 KB. Esto es 3-4
-     órdenes de magnitud menos. En Supabase (con almacenamiento facturado),
-     esta diferencia es costo real.
-
-  3. Rendimiento de escaneo: para consultas de tipo "dame todas las
-     interrupciones entre enero y marzo 2025", BRIN descarta bloques completos
-     cuyos rangos no solapan con el filtro. El planificador salta físicamente
-     porciones enteras de la tabla sin leerlas. Un B-Tree también lo hace,
-     pero a costa de mantener millones de entradas ordenadas.
-
-  4. pages_per_range = 32: reduce el rango de cada entrada BRIN a 32 páginas
-     en lugar de 128. Esto mejora la precisión del filtro (menos falsos
-     positivos) a cambio de un índice ligeramente más grande (~200 KB).
-     Para una tabla de hechos con inserción cronológica estricta, este es
-     el punto óptimo entre tamaño y selectividad.
-
-  5. Índice único compuesto (sk_tiempo, sk_interrupcion): existe UN solo
-     B-Tree sobre la surrogate key de tiempo. Esto cubre el caso de JOIN
-     con dim_tiempo que Power BI genera cuando el usuario filtra por mes/año.
-     No se indexan las demás surrogate keys individualmente porque Power BI
-     filtra primero por tiempo en el 90 % de los dashboards.
+Fact Telemtria: lectura periodica de consumo/voltaje por medidor, granularidad horaria.
+Unique: una lectura por medidor por hora.
 */
+CREATE TABLE fact_telemetria (
+    sk_telemetria          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    sk_tiempo              BIGINT        NOT NULL REFERENCES dim_tiempo(sk_tiempo),
+    sk_red_electrica       BIGINT        NOT NULL REFERENCES dim_red_electrica(sk_red_electrica),
+    sk_geografia_urbana    BIGINT        NOT NULL REFERENCES dim_geografia_urbana(sk_geografia_urbana),
+    sk_tipo_evento         BIGINT        NOT NULL DEFAULT -1
+        REFERENCES dim_tipo_evento(sk_tipo_evento) ON DELETE SET DEFAULT,
+    timestamp_lectura      TIMESTAMPTZ   NOT NULL,
+    consumo_kwh           NUMERIC(12,4) NOT NULL CHECK (consumo_kwh >= 0),
+    voltaje                NUMERIC(8,2)  NOT NULL CHECK (voltaje >= 0 AND voltaje <= 1000),
+    id_lote_procesamiento  BIGINT        REFERENCES ctrl_lotes_procesamiento(id_lote)
+);
+
+-- BRIN para consultas analiticas por rango temporal
+CREATE INDEX idx_fact_telemetria_brin_timestamp
+    ON fact_telemetria USING BRIN (timestamp_lectura)
+    WITH (pages_per_range = 32);
+
+-- B-Tree para JOINs
+CREATE INDEX idx_fact_telemetria_sk_tiempo ON fact_telemetria (sk_tiempo);
+CREATE INDEX idx_fact_telemetria_sk_red ON fact_telemetria (sk_red_electrica);
+CREATE INDEX idx_fact_telemetria_sk_tipo ON fact_telemetria (sk_tipo_evento);
+-- Unique: una lectura por medidor por hora
+CREATE UNIQUE INDEX uq_fact_telemetria_medidor_hora
+    ON fact_telemetria (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura));
+
+-- ===========================================================================
+-- ESTRATEGIA DE INDEXACION BRIN
+-- ===========================================================================
+
 CREATE INDEX IF NOT EXISTS idx_brin_fact_timestamp_inicio
     ON fact_interrupciones USING BRIN (timestamp_inicio)
     WITH (pages_per_range = 32);
@@ -278,32 +218,22 @@ CREATE INDEX IF NOT EXISTS idx_brin_fact_timestamp_fin
     ON fact_interrupciones USING BRIN (timestamp_fin)
     WITH (pages_per_range = 32);
 
--- B-Tree auxiliar para JOINs frecuentes con dim_tiempo (único índice B-Tree pesado)
 CREATE INDEX IF NOT EXISTS idx_fact_sk_tiempo
     ON fact_interrupciones (sk_tiempo);
 
--- Índice parcial para filtros de exclusión MED en vistas analíticas
 CREATE INDEX IF NOT EXISTS idx_fact_no_med
     ON fact_interrupciones (timestamp_inicio)
     WHERE excluido_med = FALSE;
 
+CREATE INDEX idx_fact_interrupciones_tipo
+    ON fact_interrupciones (sk_tipo_evento);
 
 -- ===========================================================================
--- TABLA DE AUDITORÍA: err_telemetria
+-- TABLA DE AUDITORIA: err_telemetria
 -- ===========================================================================
 
 /*
-Tabla de cuarentena para eventos anómalos.
-  Se desvían aquí:
-    - POWER_RESTORATION sin POWER_OUTAGE previa (restauración huérfana).
-    - POWER_OUTAGE sin POWER_RESTORATION dentro del lote y fuera de la ventana
-      de espera configurable (outage abierto no resuelto).
-    - Eventos con timestamp futuro o con más de N horas de diferencia respecto
-      al timestamp de carga (posible corrupción de reloj del medidor).
-
-  El stored procedure no aborta ante estos eventos: los aísla y continúa con
-  el resto del lote. Esto sigue el principio de "fail-safe" en pipelines de
-  datos: datos sucios no deben bloquear datos limpios.
+tipo_error: discriminador que separa errores de interrupciones de errores de telemetria.
 */
 CREATE TABLE err_telemetria (
     id_error           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -311,6 +241,12 @@ CREATE TABLE err_telemetria (
     id_medidor         BIGINT,
     timestamp_evento   TIMESTAMPTZ,
     tipo_evento        VARCHAR(20),
+    tipo_error         VARCHAR(50)   NOT NULL DEFAULT 'INTERRUPCION'
+        CHECK (tipo_error IN (
+            'INTERRUPCION', 'RESTAURACION_HUERFANA', 'CORTE_HUERFANO',
+            'TELEMETRIA', 'VOLTAGE_OUT_OF_RANGE', 'CONSUMO_NEGATIVO',
+            'EVENTO_DESCONOCIDO', 'MEDIDOR_INACTIVO', 'DUPLICADO'
+        )),
     motivo_error       VARCHAR(200)  NOT NULL,
     detalle_tecnico    TEXT,
     id_lote_procesamiento INTEGER,
@@ -319,12 +255,10 @@ CREATE TABLE err_telemetria (
     fecha_resolucion   TIMESTAMPTZ
 );
 
-COMMENT ON TABLE err_telemetria IS
-'Registro de cuarentena para eventos huérfanos, fuera de orden o corruptos.';
-
+CREATE INDEX idx_err_telemetria_tipo ON err_telemetria (tipo_error);
 
 -- ===========================================================================
--- SECUENCIA AUXILIAR: identificación de lotes de procesamiento
+-- SECUENCIA AUXILIAR
 -- ===========================================================================
 
 CREATE SEQUENCE IF NOT EXISTS seq_lote_procesamiento
@@ -332,12 +266,8 @@ CREATE SEQUENCE IF NOT EXISTS seq_lote_procesamiento
     INCREMENT BY 1
     NO CYCLE;
 
-COMMENT ON SEQUENCE seq_lote_procesamiento IS
-'Identificador único por ejecución del stored procedure de reconciliación.';
-
-
 -- ===========================================================================
--- TABLA DE CONTROL: metadatos de lotes procesados
+-- TABLA DE CONTROL
 -- ===========================================================================
 
 CREATE TABLE ctrl_lotes_procesamiento (
@@ -354,27 +284,10 @@ CREATE TABLE ctrl_lotes_procesamiento (
     duracion_segundos NUMERIC(10,2)
 );
 
-COMMENT ON TABLE ctrl_lotes_procesamiento IS
-'Metadata de cada lote ejecutado. Trazabilidad y soporte de reversión.';
-
-
 -- ===========================================================================
 -- CARGA INICIAL DE dim_tiempo (ejecutar UNA sola vez)
 -- ===========================================================================
 
-/*
-Precarga la dimensión de tiempo desde 2020-01-01 hasta 2030-12-31 a
-granularidad de minuto. Esto genera ~5.7 millones de filas.
-
-En PostgreSQL 15+, generate_series con intervalos produce un plan de
-ejecución lineal eficiente. La carga completa demora ~20-40 segundos
-dependiendo del tier de Supabase.
-
-Nota: si el proyecto tiene restricciones de storage, se puede reducir el
-rango o cargar on-demand desde la tabla de hechos. Pero para un data mart
-académico con un solo proyecto, la precarga es la opción más simple y
-elimina la necesidad de lógica de upsert en el SP de reconciliación.
-*/
 INSERT INTO dim_tiempo (
     timestamp_completo, minuto, hora, dia, dia_semana, dia_semana_num,
     semana_anio, mes, nombre_mes, trimestre, anio, es_fin_semana

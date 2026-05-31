@@ -19,21 +19,5 @@ services:
       timeout: 5s
       retries: 5
 
-  dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: smart_city_dashboard
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      FLASK_ENV: development
-    ports:
-      - "8050:8050"
-    volumes:
-      - ./dashboard:/app
-    depends_on:
-      postgres:
-        condition: service_healthy
-
 volumes:
   pgdata:
