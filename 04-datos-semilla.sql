@@ -32,55 +32,59 @@ INSERT INTO dim_tipo_evento (codigo_evento, categoria, severidad, es_critico, de
 -- staging_telemetria (ejemplos de lecturas de telemetría - últimas 24 horas)
 -- ---------------------------------------------------------------------------
 
+-- Fix H-5a: la telemetria usaba medidores 1001/1002 (inexistentes; el inventario
+-- va de 1 a 15) y marcas de tiempo NOW(). Se remapea a medidores reales (1 y 2) y
+-- se ancla al mismo periodo que los eventos de interrupcion (2025-01) para que el
+-- lookup de dim_red_electrica y el JOIN a dim_tiempo resuelvan y fact_telemetria se pueble.
 INSERT INTO staging_telemetria (id_medidor, timestamp_lectura, consumo_wh, voltaje, tipo_lectura) VALUES
-(1001, NOW() - INTERVAL '23 hours', 2500, 220, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '22 hours', 2300, 221, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '21 hours', 2400, 219, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '20 hours', 2350, 222, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '19 hours', 2600, 220, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '18 hours', 2800, 218, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '17 hours', 2900, 225, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '16 hours', 2700, 223, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '15 hours', 2450, 220, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '14 hours', 2300, 221, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '13 hours', 2200, 219, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '12 hours', 2100, 218, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '11 hours', 2000, 217, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '10 hours', 1950, 220, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '9 hours', 1900, 221, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '8 hours', 1850, 219, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '7 hours', 1800, 218, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '6 hours', 1750, 217, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '5 hours', 1700, 220, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '4 hours', 1650, 221, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '3 hours', 1600, 219, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '2 hours', 1550, 218, 'LECTURA_PERIODICA'),
-(1001, NOW() - INTERVAL '1 hour', 1500, 220, 'LECTURA_PERIODICA'),
-(1001, NOW(), 1450, 221, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '23 hours', 1800, 219, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '22 hours', 1750, 218, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '21 hours', 1700, 220, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '20 hours', 1650, 221, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '19 hours', 1600, 219, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '18 hours', 1550, 218, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '17 hours', 1500, 217, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '16 hours', 1450, 220, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '15 hours', 1400, 221, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '14 hours', 1350, 219, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '13 hours', 1300, 218, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '12 hours', 1250, 217, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '11 hours', 1200, 220, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '10 hours', 1150, 221, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '9 hours', 1100, 219, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '8 hours', 1050, 218, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '7 hours', 1000, 217, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '6 hours', 950, 220, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '5 hours', 900, 221, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '4 hours', 850, 219, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '3 hours', 800, 218, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '2 hours', 750, 217, 'LECTURA_PERIODICA'),
-(1002, NOW() - INTERVAL '1 hour', 700, 220, 'LECTURA_PERIODICA'),
-(1002, NOW(), 650, 221, 'LECTURA_PERIODICA');
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '23 hours', 2500, 220, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '22 hours', 2300, 221, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '21 hours', 2400, 219, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '20 hours', 2350, 222, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '19 hours', 2600, 220, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '18 hours', 2800, 218, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '17 hours', 2900, 225, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '16 hours', 2700, 223, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '15 hours', 2450, 220, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '14 hours', 2300, 221, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '13 hours', 2200, 219, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '12 hours', 2100, 218, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '11 hours', 2000, 217, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '10 hours', 1950, 220, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '9 hours', 1900, 221, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '8 hours', 1850, 219, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '7 hours', 1800, 218, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '6 hours', 1750, 217, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '5 hours', 1700, 220, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '4 hours', 1650, 221, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '3 hours', 1600, 219, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '2 hours', 1550, 218, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '1 hour', 1500, 220, 'LECTURA_PERIODICA'),
+(1, '2025-01-15 00:00:00+00'::TIMESTAMPTZ, 1450, 221, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '23 hours', 1800, 219, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '22 hours', 1750, 218, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '21 hours', 1700, 220, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '20 hours', 1650, 221, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '19 hours', 1600, 219, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '18 hours', 1550, 218, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '17 hours', 1500, 217, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '16 hours', 1450, 220, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '15 hours', 1400, 221, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '14 hours', 1350, 219, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '13 hours', 1300, 218, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '12 hours', 1250, 217, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '11 hours', 1200, 220, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '10 hours', 1150, 221, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '9 hours', 1100, 219, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '8 hours', 1050, 218, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '7 hours', 1000, 217, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '6 hours', 950, 220, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '5 hours', 900, 221, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '4 hours', 850, 219, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '3 hours', 800, 218, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '2 hours', 750, 217, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ - INTERVAL '1 hour', 700, 220, 'LECTURA_PERIODICA'),
+(2, '2025-01-15 00:00:00+00'::TIMESTAMPTZ, 650, 221, 'LECTURA_PERIODICA');
 
 -- ---------------------------------------------------------------------------
 -- dim_geografia_urbana
@@ -118,6 +122,31 @@ VALUES
 (13, 13, 'MED-0013', 'Transformador B1-T1', 'Circuito B1', 'Subestación B', 238.78, 'ACTIVO', NULL, TRUE),
 (14, 14, 'MED-0014', 'Transformador B1-T1', 'Circuito B1', 'Subestación B', 252.14, 'ACTIVO', NULL, TRUE),
 (15, 15, 'MED-0015', 'Transformador B1-T2', 'Circuito B1', 'Subestación B', 414.24, 'ACTIVO', NULL, TRUE);
+
+-- Fix H-4: asignar geografia a cada activo de red de forma determinista.
+-- Subestacion A -> sectores ordinales 1..4 ; Subestacion B -> sectores 5..8.
+-- Da estructura geografica real al drill-down y a los filtros por sector.
+WITH geo AS (
+    SELECT sk_geografia_urbana AS sk,
+           ROW_NUMBER() OVER (ORDER BY sk_geografia_urbana) AS rn
+    FROM dim_geografia_urbana
+)
+UPDATE dim_red_electrica dre
+SET sk_geografia_urbana = geo.sk
+FROM geo
+WHERE geo.rn = CASE dre.subestacion
+        WHEN 'Subestación A' THEN 1 + (dre.id_medidor % 4)
+        WHEN 'Subestación B' THEN 5 + (dre.id_medidor % 4)
+        ELSE 1 + (dre.id_medidor % 8)
+    END;
+
+-- El seed omite fecha_inicio, por lo que tomaba DEFAULT NOW() (fecha de carga).
+-- Eso dejaba la version SCD2 vigente DESPUES de los eventos historicos, y el lookup
+-- temporal del SP (fecha_inicio <= ts_outage) nunca encontraba el activo, mandando
+-- todo al fallback "DESCONOCIDO". Se retrodata el alta antes del periodo de datos.
+UPDATE dim_red_electrica
+SET fecha_inicio = '2024-01-01 00:00:00+00'::TIMESTAMPTZ
+WHERE fecha_inicio > '2024-06-01 00:00:00+00'::TIMESTAMPTZ;
 
 -- ---------------------------------------------------------------------------
 -- dim_clientes_inventario
