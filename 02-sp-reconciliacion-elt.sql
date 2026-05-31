@@ -76,6 +76,7 @@ DECLARE
     v_sk_clientes      BIGINT;
     v_existe_hecho     BOOLEAN;
     v_existe_error     BOOLEAN;
+    v_sk_tipo_evento   BIGINT;
 BEGIN
     -- =====================================================================
     -- BLOQUE 0: Inicialización del lote
@@ -202,6 +203,8 @@ BEGIN
                     THEN id_evento END)          AS id_outage,
                 MAX(CASE WHEN tipo_evento = 'POWER_OUTAGE'
                     THEN timestamp_evento END)   AS ts_outage,
+                MAX(CASE WHEN tipo_evento = 'POWER_OUTAGE'
+                    THEN tipo_evento END)        AS tipo_evento_outage,
                 MAX(CASE WHEN tipo_evento = 'POWER_RESTORATION'
                     THEN id_evento END)          AS id_restoration,
                 MAX(CASE WHEN tipo_evento = 'POWER_RESTORATION'
@@ -215,6 +218,7 @@ BEGIN
             p.eventos_en_par,
             p.id_outage,
             p.ts_outage,
+            p.tipo_evento_outage,
             p.id_restoration,
             p.ts_restoration,
             -- Clasificación del par
@@ -359,10 +363,38 @@ BEGIN
             END IF;
 
             -- ----------------------------------------------------------------
+            -- Resolución de sk_tipo_evento (nueva columna en fact_interrupciones)
+            -- ----------------------------------------------------------------
+            SELECT sk_tipo_evento INTO v_sk_tipo_evento
+            FROM dim_tipo_evento
+            WHERE codigo_evento = v_rec.tipo_evento_outage;
+
+            IF v_sk_tipo_evento IS NULL THEN
+                -- Tipo de evento desconocido: usar -1 y registrar error
+                v_sk_tipo_evento := -1;
+
+                INSERT INTO err_telemetria (
+                    id_evento_origen, id_medidor, timestamp_evento, tipo_evento,
+                    tipo_error, motivo_error, id_lote_procesamiento,
+                    detalle_tecnico
+                ) VALUES (
+                    v_rec.id_outage,
+                    v_rec.id_medidor,
+                    v_rec.ts_outage,
+                    COALESCE(v_rec.tipo_evento_outage, 'UNKNOWN'),
+                    'EVENTO_DESCONOCIDO',
+                    'Tipo de evento ''' || COALESCE(v_rec.tipo_evento_outage, 'NULL') || ''' no existe en dim_tipo_evento',
+                    v_lote_id,
+                    'Se inserta con sk_tipo_evento = -1 (UNKNOWN). Verificar dim_tipo_evento.'
+                ) ON CONFLICT DO NOTHING;
+            END IF;
+
+            -- ----------------------------------------------------------------
             -- Insertar hecho en la tabla de hechos
             -- ----------------------------------------------------------------
             INSERT INTO fact_interrupciones (
                 sk_tiempo, sk_red_electrica, sk_geografia_urbana, sk_clientes,
+                sk_tipo_evento,
                 id_medidor, timestamp_inicio, timestamp_fin,
                 duracion_minutos, clientes_afectados,
                 id_lote_procesamiento
@@ -371,6 +403,7 @@ BEGIN
                 v_sk_red,
                 v_sk_geo,
                 v_sk_clientes,
+                v_sk_tipo_evento,
                 v_rec.id_medidor,
                 v_rec.ts_outage,
                 v_rec.ts_restoration,
@@ -570,4 +603,453 @@ COMMENT ON PROCEDURE sp_reconciliar_interrupciones IS
 aplica filtro IEEE 1366 (< 5 min), desvía huérfanos a err_telemetria.';
 
 COMMENT ON FUNCTION fn_reconciliar_interrupciones IS
+'Wrapper JSON para invocación desde n8n. Retorna resumen del lote procesado.';
+
+
+-- =============================================================================
+-- PROYECTO: Arquitectura Analítica de Resiliencia para Smart City (Smart Grid)
+-- MATERIA:  Gestión de Datos — Prof. Armen Djenanian
+-- SP3:      sp_reconciliar_telemetria() + fn_reconciliar_telemetria()
+-- PLATAFORMA: Supabase (PostgreSQL 15+)
+--
+-- NOTAS DE ARQUITECTURA (embebidas como comentarios):
+--
+--   Estrategia ELT para Telemetría:
+--     A diferencia de sp_reconciliar_interrupciones (cursor + window functions),
+--     este SP usa un INSERT masivo basado en conjuntos (set-based) que es más
+--     eficiente para grandes volúmenes de lecturas horarias.
+--
+--   Algoritmo:
+--     Bloque 0: Inicialización de lote (mismo patrón que interrupciones)
+--     Bloque 1: Validación y desvío de errores (MEDIDOR_INACTIVO, VOLTAGE_OUT_OF_RANGE, CONSUMO_NEGATIVO)
+--     Bloque 2: Bulk INSERT con conversión Wh→kWh y resolución de SKs
+--     Bloque 3: Marcar staging.procesado=TRUE, actualizar ctrl_lotes_procesamiento
+--
+--   Idempotencia:
+--     - Solo procesa registros con procesado = FALSE
+--     - ON CONFLICT DO NOTHING previene duplicados en fact_telemetria
+--     - Marcar procesado = TRUE al final (misma transacción, ROLLBACK si falla)
+--     - Ejecutar múltiples veces produce el mismo resultado que una vez
+--
+--   Validación en Bloque 1:
+--     Los errores se desvían a err_telemetria con tipo_error específico para
+--     facilitar el monitoreo y debugging desde n8n.
+-- =============================================================================
+
+
+CREATE OR REPLACE PROCEDURE sp_reconciliar_telemetria(
+    p_fecha_inicio TIMESTAMPTZ DEFAULT NULL,
+    p_fecha_fin    TIMESTAMPTZ DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    -- Identificador único del lote actual
+    v_lote_id          INTEGER;
+
+    -- Contadores para la tabla de control
+    v_total_lecturas   INTEGER := 0;
+    v_total_hechos     INTEGER := 0;
+    v_total_errores    INTEGER := 0;
+    v_total_medidor_inactivo INTEGER := 0;
+    v_total_voltage_out_range INTEGER := 0;
+    v_total_consumo_negativo  INTEGER := 0;
+
+    -- Temporización
+    v_inicio_ejecucion TIMESTAMPTZ;
+    v_fin_ejecucion    TIMESTAMPTZ;
+
+    -- Constantes de validación
+    C_VOLTAGE_MIN      NUMERIC(8,2) := 0;
+    C_VOLTAGE_MAX      NUMERIC(8,2) := 1000;
+    C_VOLTAGE_NORMAL_MIN NUMERIC(8,2) := 180;
+    C_VOLTAGE_NORMAL_MAX NUMERIC(8,2) := 260;
+BEGIN
+    -- =====================================================================
+    -- BLOQUE 0: Inicialización del lote
+    -- =====================================================================
+    v_inicio_ejecucion := clock_timestamp();
+    v_lote_id := nextval('seq_lote_procesamiento');
+
+    INSERT INTO ctrl_lotes_procesamiento (
+        id_lote, fecha_inicio, fecha_fin, estado
+    ) VALUES (
+        v_lote_id,
+        COALESCE(p_fecha_inicio, '-infinity'::TIMESTAMPTZ),
+        COALESCE(p_fecha_fin,    'infinity'::TIMESTAMPTZ),
+        'INICIADO'
+    );
+
+    -- =====================================================================
+    -- BLOQUE 1: Validación y desvío de errores
+    -- =====================================================================
+    /*
+    Validaciones realizadas:
+      - Voltaje fuera de rango (0-1000V aceptable, 180-260V normal)
+      - Consumo negativo
+      - Medidor inactivo (no existe en dim_red_electrica o activo_bool=FALSE)
+
+    Cada tipo de error se registra en err_telemetria con tipo_error específico.
+    */
+
+    -- Contar lecturas totales que serán procesadas
+    SELECT COUNT(*) INTO v_total_lecturas
+    FROM staging_telemetria st
+    WHERE st.procesado = FALSE
+      AND (p_fecha_inicio IS NULL OR st.timestamp_lectura >= p_fecha_inicio)
+      AND (p_fecha_fin    IS NULL OR st.timestamp_lectura <= p_fecha_fin);
+
+    -- ----------------------------------------------------------------
+    -- Desvío: Medidores inactivos
+    -- Un medidor es inactivo si NO existe en dim_red_electrica con
+    -- fecha_inicio <= timestamp_lectura Y (fecha_fin IS NULL OR fecha_fin > timestamp_lectura)
+    -- ----------------------------------------------------------------
+    WITH medidores_inactivos AS (
+        SELECT DISTINCT
+            st.id_staging,
+            st.id_medidor,
+            st.timestamp_lectura,
+            st.consumo_wh,
+            st.voltaje,
+            st.tipo_lectura,
+            'MEDIDOR_INACTIVO: medidor no existe en dim_red_electrica o no está activo para esta fecha' AS motivo
+        FROM staging_telemetria st
+        WHERE st.procesado = FALSE
+          AND (p_fecha_inicio IS NULL OR st.timestamp_lectura >= p_fecha_inicio)
+          AND (p_fecha_fin    IS NULL OR st.timestamp_lectura <= p_fecha_fin)
+          AND NOT EXISTS (
+              SELECT 1 FROM dim_red_electrica dre
+              WHERE dre.id_medidor_origen = st.id_medidor
+                AND dre.fecha_inicio <= st.timestamp_lectura
+                AND (dre.fecha_fin IS NULL OR dre.fecha_fin > st.timestamp_lectura)
+                AND dre.activo_bool = TRUE
+          )
+    )
+    INSERT INTO err_telemetria (
+        id_evento_origen, id_medidor, timestamp_evento, tipo_evento,
+        tipo_error, motivo_error, detalle_tecnico, id_lote_procesamiento
+    )
+    SELECT
+        mi.id_staging,
+        mi.id_medidor,
+        mi.timestamp_lectura,
+        mi.tipo_lectura,
+        'MEDIDOR_INACTIVO',
+        mi.motivo,
+        jsonb_build_object(
+            'consumo_wh', mi.consumo_wh,
+            'voltaje', mi.voltaje,
+            'tipo_lectura', mi.tipo_lectura,
+            'bloque', 'BLOQUE_1'
+        )::TEXT,
+        v_lote_id
+    FROM medidores_inactivos mi
+    WHERE NOT EXISTS (
+        -- Idempotencia: no insertar si ya existe en err_telemetria
+        SELECT 1 FROM err_telemetria e
+        WHERE e.id_evento_origen = mi.id_staging
+          AND e.tipo_error = 'MEDIDOR_INACTIVO'
+    );
+
+    GET DIAGNOSTICS v_total_medidor_inactivo = ROW_COUNT;
+    v_total_errores := v_total_errores + v_total_medidor_inactivo;
+
+    -- Marcar medidores inactivos como procesados para excluirlos del INSERT
+    UPDATE staging_telemetria st
+    SET procesado = TRUE
+    FROM medidores_inactivos mi
+    WHERE st.id_staging = mi.id_staging;
+
+    -- ----------------------------------------------------------------
+    -- Desvío: Voltaje fuera de rango (0-1000V aceptable)
+    -- Los voltajes fuera de rango normal (180-260V) se registran pero
+    -- NO se excluyen del INSERT - se marcan en err_telemetria como警告
+    -- ----------------------------------------------------------------
+    WITH voltajes_invalidos AS (
+        SELECT DISTINCT
+            st.id_staging,
+            st.id_medidor,
+            st.timestamp_lectura,
+            st.consumo_wh,
+            st.voltaje,
+            st.tipo_lectura,
+            CASE
+                WHEN st.voltaje < C_VOLTAGE_MIN OR st.voltaje > C_VOLTAGE_MAX
+                    THEN 'VOLTAGE_OUT_OF_RANGE: voltaje fuera del rango aceptable 0-1000V'
+                WHEN st.voltaje < C_VOLTAGE_NORMAL_MIN OR st.voltaje > C_VOLTAGE_NORMAL_MAX
+                    THEN 'VOLTAGE_OUT_OF_RANGE: voltaje fuera del rango normal 180-260V (posible fluctuación)'
+            END AS motivo
+        FROM staging_telemetria st
+        WHERE st.procesado = FALSE
+          AND (p_fecha_inicio IS NULL OR st.timestamp_lectura >= p_fecha_inicio)
+          AND (p_fecha_fin    IS NULL OR st.timestamp_lectura <= p_fecha_fin)
+          AND (st.voltaje < C_VOLTAGE_MIN OR st.voltaje > C_VOLTAGE_MAX
+               OR st.voltaje < C_VOLTAGE_NORMAL_MIN OR st.voltaje > C_VOLTAGE_NORMAL_MAX)
+          AND EXISTS (
+              -- Solo si el medidor está activo (ya se validó arriba)
+              SELECT 1 FROM dim_red_electrica dre
+              WHERE dre.id_medidor_origen = st.id_medidor
+                AND dre.fecha_inicio <= st.timestamp_lectura
+                AND (dre.fecha_fin IS NULL OR dre.fecha_fin > st.timestamp_lectura)
+                AND dre.activo_bool = TRUE
+          )
+    )
+    INSERT INTO err_telemetria (
+        id_evento_origen, id_medidor, timestamp_evento, tipo_evento,
+        tipo_error, motivo_error, detalle_tecnico, id_lote_procesamiento
+    )
+    SELECT
+        vi.id_staging,
+        vi.id_medidor,
+        vi.timestamp_lectura,
+        vi.tipo_lectura,
+        'VOLTAGE_OUT_OF_RANGE',
+        vi.motivo,
+        jsonb_build_object(
+            'voltaje', vi.voltaje,
+            'rango_aceptable', format('[%s, %s]', C_VOLTAGE_MIN, C_VOLTAGE_MAX),
+            'rango_normal', format('[%s, %s]', C_VOLTAGE_NORMAL_MIN, C_VOLTAGE_NORMAL_MAX),
+            'bloque', 'BLOQUE_1'
+        )::TEXT,
+        v_lote_id
+    FROM voltajes_invalidos vi
+    WHERE NOT EXISTS (
+        SELECT 1 FROM err_telemetria e
+        WHERE e.id_evento_origen = vi.id_staging
+          AND e.tipo_error = 'VOLTAGE_OUT_OF_RANGE'
+    );
+
+    GET DIAGNOSTICS v_total_voltage_out_range = ROW_COUNT;
+    v_total_errores := v_total_errores + v_total_voltage_out_range;
+
+    -- NOTE: Voltajes fuera de rango NO se marcan como procesados -
+    -- se incluyen en el INSERT pero se registran como advertencia
+
+    -- ----------------------------------------------------------------
+    -- Desvío: Consumo negativo
+    -- ----------------------------------------------------------------
+    WITH consumo_negativo AS (
+        SELECT DISTINCT
+            st.id_staging,
+            st.id_medidor,
+            st.timestamp_lectura,
+            st.consumo_wh,
+            st.voltaje,
+            st.tipo_lectura,
+            'CONSUMO_NEGATIVO: consumo_wh no puede ser negativo' AS motivo
+        FROM staging_telemetria st
+        WHERE st.procesado = FALSE
+          AND (p_fecha_inicio IS NULL OR st.timestamp_lectura >= p_fecha_inicio)
+          AND (p_fecha_fin    IS NULL OR st.timestamp_lectura <= p_fecha_fin)
+          AND st.consumo_wh < 0
+          AND EXISTS (
+              SELECT 1 FROM dim_red_electrica dre
+              WHERE dre.id_medidor_origen = st.id_medidor
+                AND dre.fecha_inicio <= st.timestamp_lectura
+                AND (dre.fecha_fin IS NULL OR dre.fecha_fin > st.timestamp_lectura)
+                AND dre.activo_bool = TRUE
+          )
+    )
+    INSERT INTO err_telemetria (
+        id_evento_origen, id_medidor, timestamp_evento, tipo_evento,
+        tipo_error, motivo_error, detalle_tecnico, id_lote_procesamiento
+    )
+    SELECT
+        cn.id_staging,
+        cn.id_medidor,
+        cn.timestamp_lectura,
+        cn.tipo_lectura,
+        'CONSUMO_NEGATIVO',
+        cn.motivo,
+        jsonb_build_object(
+            'consumo_wh', cn.consumo_wh,
+            'voltaje', cn.voltaje,
+            'bloque', 'BLOQUE_1'
+        )::TEXT,
+        v_lote_id
+    FROM consumo_negativo cn
+    WHERE NOT EXISTS (
+        SELECT 1 FROM err_telemetria e
+        WHERE e.id_evento_origen = cn.id_staging
+          AND e.tipo_error = 'CONSUMO_NEGATIVO'
+    );
+
+    GET DIAGNOSTICS v_total_consumo_negativo = ROW_COUNT;
+    v_total_errores := v_total_errores + v_total_consumo_negativo;
+
+    -- Marcar consumos negativos como procesados
+    UPDATE staging_telemetria st
+    SET procesado = TRUE
+    FROM consumo_negativo cn
+    WHERE st.id_staging = cn.id_staging;
+
+    -- =====================================================================
+    -- BLOQUE 2: Bulk INSERT con conversión de unidades y resolución de SKs
+    -- =====================================================================
+    /*
+    Conversiones y resolvedores:
+      - consumo_wh → consumo_kwh (÷ 1000)
+      - sk_tiempo: DATE_TRUNC('hour', timestamp_lectura) → dim_tiempo.sk_tiempo
+      - sk_red_electrica: lookup por id_medidor + fecha_inicio <= timestamp
+      - sk_geografia_urbana: JOIN dim_red_electrica → dim_geografia_urbana
+      - sk_tipo_evento: lookup por tipo_lectura → dim_tipo_evento.codigo_evento
+
+    ON CONFLICT DO NOTHING: si ya existe (medidor + hora), se ignora
+    */
+
+    INSERT INTO fact_telemetria (
+        sk_tiempo, sk_red_electrica, sk_geografia_urbana, sk_tipo_evento,
+        timestamp_lectura, consumo_kwh, voltaje, id_lote_procesamiento
+    )
+    SELECT
+        dt.sk_tiempo,
+        dre.sk_red_electrica,
+        COALESCE(
+            (SELECT sk_geografia_urbana FROM dim_geografia_urbana LIMIT 1),
+            -1
+        ),                                          -- Geografía por defecto (primera disponible)
+        COALESCE(dte.sk_tipo_evento, -1),            -- Unknown si no existe el tipo
+        DATE_TRUNC('hour', st.timestamp_lectura),
+        st.consumo_wh / 1000.0,                      -- Conversión Wh → kWh
+        st.voltaje,
+        v_lote_id
+    FROM staging_telemetria st
+    -- Resolver SK de tiempo: truncar timestamp_lectura a hora
+    JOIN dim_tiempo dt
+        ON dt.timestamp_completo = DATE_TRUNC('hour', st.timestamp_lectura)
+    -- Resolver SK de red eléctrica: medidor activo al momento de la lectura
+    JOIN dim_red_electrica dre
+        ON dre.id_medidor_origen = st.id_medidor
+        AND dre.fecha_inicio <= st.timestamp_lectura
+        AND (dre.fecha_fin IS NULL OR dre.fecha_fin > st.timestamp_lectura)
+        AND dre.activo_bool = TRUE
+    -- Resolver SK de tipo de evento: por codigo_evento = tipo_lectura
+    LEFT JOIN dim_tipo_evento dte
+        ON dte.codigo_evento = st.tipo_lectura
+    WHERE st.procesado = FALSE
+      AND (p_fecha_inicio IS NULL OR st.timestamp_lectura >= p_fecha_inicio)
+      AND (p_fecha_fin    IS NULL OR st.timestamp_lectura <= p_fecha_fin)
+      -- Validaciones: solo incluir registros válidos
+      AND st.voltaje >= C_VOLTAGE_MIN
+      AND st.voltaje <= C_VOLTAGE_MAX
+      AND st.consumo_wh >= 0
+    ON CONFLICT (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura)) DO NOTHING;
+
+    GET DIAGNOSTICS v_total_hechos = ROW_COUNT;
+
+    -- =====================================================================
+    -- BLOQUE 3: Marcar como procesados y finalizar auditoría
+    -- =====================================================================
+    UPDATE staging_telemetria
+    SET procesado = TRUE,
+        id_lote_procesamiento = v_lote_id
+    WHERE procesado = FALSE
+      AND (p_fecha_inicio IS NULL OR timestamp_lectura >= p_fecha_inicio)
+      AND (p_fecha_fin    IS NULL OR timestamp_lectura <= p_fecha_fin)
+      -- Excluir los que ya se marcaron en BLOQUE 1 (medidor inactivo, consumo negativo)
+      AND NOT EXISTS (
+          SELECT 1 FROM err_telemetria e
+          WHERE e.id_evento_origen = staging_telemetria.id_staging
+            AND e.id_lote_procesamiento = v_lote_id
+      );
+
+    -- =====================================================================
+    -- Finalización: actualizar ctrl_lotes_procesamiento
+    -- =====================================================================
+    v_fin_ejecucion := clock_timestamp();
+
+    UPDATE ctrl_lotes_procesamiento
+    SET total_eventos      = v_total_lecturas,
+        total_hechos       = v_total_hechos,
+        total_huerfanos    = v_total_errores,
+        total_transitorios = v_total_medidor_inactivo + v_total_consumo_negativo,
+        estado             = 'COMPLETADO',
+        duracion_segundos  = EXTRACT(EPOCH FROM (v_fin_ejecucion - v_inicio_ejecucion))
+    WHERE id_lote = v_lote_id;
+
+    -- =====================================================================
+    -- Log informativo
+    -- =====================================================================
+    RAISE NOTICE 'Lote % completado: % lecturas, % insertadas en fact_telemetria, % errores (% med inact, % volt fuera rango, % consumo neg) en % segundos.',
+        v_lote_id, v_total_lecturas, v_total_hechos, v_total_errores,
+        v_total_medidor_inactivo, v_total_voltage_out_range, v_total_consumo_negativo,
+        ROUND(EXTRACT(EPOCH FROM (v_fin_ejecucion - v_inicio_ejecucion))::NUMERIC, 2);
+
+EXCEPTION
+    WHEN OTHERS THEN
+        UPDATE ctrl_lotes_procesamiento
+        SET estado = 'FALLIDO'
+        WHERE id_lote = v_lote_id;
+
+        RAISE;
+END;
+$$;
+
+
+-- =============================================================================
+-- WRAPPER: Función SQL para invocación programática desde n8n o cron
+-- =============================================================================
+
+/*
+Wrapper JSON para sp_reconciliar_telemetria(). Devuelve resumen del lote
+procesado para facilitar monitoreo desde n8n.
+
+Ejemplo de invocación desde n8n (Supabase node):
+  SELECT * FROM fn_reconciliar_telemetria(
+      '2025-01-01 00:00:00+00'::TIMESTAMPTZ,
+      '2025-01-31 23:59:59+00'::TIMESTAMPTZ
+  );
+
+Ejemplo con pg_cron (procesar las últimas 24 horas cada hora):
+  SELECT cron.schedule(
+      'reconciliacion-telemetria-horaria',
+      '5 * * * *',
+      'CALL sp_reconciliar_telemetria(
+          NOW() - INTERVAL ''25 hours'',
+          NOW() - INTERVAL ''1 hour''
+      )'
+  );
+*/
+
+CREATE OR REPLACE FUNCTION fn_reconciliar_telemetria(
+    p_fecha_inicio TIMESTAMPTZ DEFAULT NULL,
+    p_fecha_fin    TIMESTAMPTZ DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_resultado JSONB;
+    v_lote_id  INTEGER;
+BEGIN
+    -- Obtener el próximo ID de lote antes de ejecutar
+    v_lote_id := currval('seq_lote_procesamiento') + 1;
+
+    -- Ejecutar el stored procedure
+    CALL sp_reconciliar_telemetria(p_fecha_inicio, p_fecha_fin);
+
+    -- Leer el resultado desde la tabla de control
+    SELECT jsonb_build_object(
+        'lote_id',           id_lote,
+        'estado',            estado,
+        'total_eventos',     total_eventos,
+        'total_hechos',      total_hechos,
+        'total_huerfanos',   total_huerfanos,
+        'total_transitorios', total_transitorios,
+        'duracion_segundos',  duracion_segundos,
+        'fecha_ejecucion',    fecha_ejecucion
+    ) INTO v_resultado
+    FROM ctrl_lotes_procesamiento
+    WHERE id_lote = v_lote_id;
+
+    RETURN v_resultado;
+END;
+$$;
+
+
+COMMENT ON PROCEDURE sp_reconciliar_telemetria IS
+'SP idempotente de reconciliación ELT para telemetría. Bulk INSERT con conversión Wh→kWh,
+validación de voltaje/consumo, resolución de SKs.';
+
+COMMENT ON FUNCTION fn_reconciliar_telemetria IS
 'Wrapper JSON para invocación desde n8n. Retorna resumen del lote procesado.';
