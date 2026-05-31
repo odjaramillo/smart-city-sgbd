@@ -64,6 +64,8 @@ def parse_ddl(path: str) -> dict:
         "dim_geografia_urbana",
         "dim_red_electrica",
         "dim_clientes_inventario",
+        "dim_tipo_evento",
+        "staging_telemetria",
         "staging_eventos",
     }
 
@@ -469,6 +471,68 @@ def emit_sql(events: dict, meters: list, ddl_cols: dict, args):
         "version": 2,
     })
 
+    # dim_tipo_evento — fila -1 obligatoria + catálogo para Stress Test
+    tipo_evento_rows = []
+    # Fila -1 (Unknown) — insertada primero, sequence se resetea después
+    tipo_evento_rows.append({
+        "sk_tipo_evento": -1,
+        "codigo_evento": "UNKNOWN",
+        "categoria": "DESCONOCIDO",
+        "severidad": "DESCONOCIDA",
+        "es_critico": False,
+        "descripcion": "Tipo de evento no reconocido",
+    })
+    # Catálogo de eventos
+    catalog_events = [
+        ("POWER_OUTAGE", "INTERRUPCION", "ALTA", True, "Corte de energía detectado por smart meter"),
+        ("POWER_RESTORATION", "INTERRUPCION", "MEDIA", False, "Restauración de energía"),
+        ("VOLTAGE_SPIKE", "FLUCTUACION", "ALTA", True, "Pico de voltaje (>260V)"),
+        ("VOLTAGE_SAG", "FLUCTUACION", "MEDIA", False, "Caída de voltaje (<180V)"),
+        ("HEARTBEAT", "TELEMETRIA", "BAJA", False, "Señal de vida del medidor"),
+        ("LECTURA_PERIODICA", "TELEMETRIA", "BAJA", False, "Lectura periódica de consumo/voltaje"),
+    ]
+    for codigo, categoria, severidad, es_critico, descripcion in catalog_events:
+        tipo_evento_rows.append({
+            "codigo_evento": codigo,
+            "categoria": categoria,
+            "severidad": severidad,
+            "es_critico": es_critico,
+            "descripcion": descripcion,
+        })
+
+    # staging_telemetria — lecturas horarias de consumo/voltaje
+    # Generar ~24 horas de lecturas por medidor (aproximadamente 1 lectura/hora)
+    telemetry_rows = []
+    # Horas del día con perfiles de consumo típicos (residencial)
+    HOURLY_CONSUMPTION_PROFILE = {
+        0: 0.8, 1: 0.7, 2: 0.7, 3: 0.7, 4: 0.7, 5: 0.8,  # Noche baja
+        6: 1.0, 7: 1.2, 8: 1.5, 9: 1.3, 10: 1.2, 11: 1.3,  # Mañana
+        12: 1.4, 13: 1.3, 14: 1.2, 15: 1.1, 16: 1.2, 17: 1.3,  # Tarde
+        18: 1.8, 19: 2.0, 20: 2.2, 21: 1.9, 22: 1.5, 23: 1.0,  # Pico vespertino
+    }
+    base_consumption = 2.0  # kWh base por hora
+    base_voltage = 220.0  # V base
+
+    for meter in meters:
+        meter_id = meter["id"]
+        # Generar lecturas para las últimas 48 horas
+        for hour_offset in range(48):
+            ts = datetime.now(timezone.utc) - timedelta(hours=hour_offset)
+            hour = ts.hour
+            # Consumption con variación aleatoria ±15%
+            consumption_factor = HOURLY_CONSUMPTION_PROFILE.get(hour, 1.0)
+            consumo_wh = base_consumption * consumption_factor * random.uniform(0.85, 1.15) * 1000  # Wh
+            # Voltage con pequeña variación ±5V
+            voltaje = base_voltage + random.uniform(-5, 5)
+            telemetry_rows.append({
+                "id_medidor": meter_id,
+                "timestamp_lectura": ts,
+                "consumo_wh": round(consumo_wh, 2),
+                "voltaje": round(voltaje, 2),
+                "tipo_lectura": "LECTURA_PERIODICA",
+                "procesado": False,
+            })
+
     # Staging events — aplanar todos los eventos de todos los medidores
     staging_rows = []
     for mid in sorted(events.keys()):
@@ -517,6 +581,29 @@ def emit_sql(events: dict, meters: list, ddl_cols: dict, args):
         f.write("-- ==============================================================================\n")
         f.write("\nBEGIN;\n")
 
+        # dim_tipo_evento — OBLIGATORIO: ejecutar antes de cualquier fact table
+        f.write("\n-- ---------------------------------------------------------------------------\n")
+        f.write("-- dim_tipo_evento (OBLIGATORIO: ejecutar ANTES de cualquier fact table)\n")
+        f.write("-- ---------------------------------------------------------------------------\n")
+        f.write("-- Fila obligatoria -1 (Unknown) — debe existir antes de las fact tables\n")
+        # Emitir solo la fila -1 primero (sin columns para usar DEFAULT)
+        unknown_row = [r for r in tipo_evento_rows if r.get("sk_tipo_evento") == -1]
+        if unknown_row:
+            f.write("INSERT INTO dim_tipo_evento (sk_tipo_evento, codigo_evento, categoria, severidad, es_critico, descripcion)\n")
+            f.write("OVERRIDING SYSTEM VALUE\n")
+            f.write("VALUES (-1, 'UNKNOWN', 'DESCONOCIDO', 'DESCONOCIDA', FALSE, 'Tipo de evento no reconocido');\n")
+            f.write("\n-- Reset sequence para que los próximos inserts usen IDs correctos\n")
+            f.write("SELECT setval('dim_tipo_evento_sk_tipo_evento_seq', 1, false);\n")
+        # Emitir catálogo (sin sk_tipo_evento para usar IDENTITY)
+        catalog_rows = [r for r in tipo_evento_rows if r.get("sk_tipo_evento") != -1]
+        emit_insert_section(f, "dim_tipo_evento", ddl_cols["dim_tipo_evento"], catalog_rows)
+
+        # staging_telemetria
+        f.write("\n-- ---------------------------------------------------------------------------\n")
+        f.write("-- staging_telemetria (lecturas horarias de consumo/voltaje)\n")
+        f.write("-- ---------------------------------------------------------------------------\n")
+        emit_insert_section(f, "staging_telemetria", ddl_cols["staging_telemetria"], telemetry_rows)
+
         emit_insert_section(f, "dim_geografia_urbana", ddl_cols["dim_geografia_urbana"], geo_rows)
         emit_insert_section(f, "dim_red_electrica", ddl_cols["dim_red_electrica"], red_rows)
         emit_insert_section(f, "dim_clientes_inventario", ddl_cols["dim_clientes_inventario"], client_rows)
@@ -538,7 +625,7 @@ def emit_sql(events: dict, meters: list, ddl_cols: dict, args):
         f.write("-- ==============================================================================\n")
 
     print(f"[OK] SQL escrito en {output_path}")
-    print(f"     Filas: geo={len(geo_rows)} red={len(red_rows)} clientes={len(client_rows)} staging={len(staging_rows)}")
+    print(f"     Filas: tipo_evento={len(tipo_evento_rows)} telemetry={len(telemetry_rows)} geo={len(geo_rows)} red={len(red_rows)} clientes={len(client_rows)} staging={len(staging_rows)}")
 
 
 # ---------------------------------------------------------------------------

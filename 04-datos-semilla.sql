@@ -8,6 +8,81 @@
 BEGIN;
 
 -- ---------------------------------------------------------------------------
+-- dim_tipo_evento (OBLIGATORIO: ejecutar ANTES de cualquier fact table)
+-- ---------------------------------------------------------------------------
+
+-- Fila obligatoria -1 (Unknown) — debe existir antes de las fact tables
+INSERT INTO dim_tipo_evento (sk_tipo_evento, codigo_evento, categoria, severidad, es_critico, descripcion)
+OVERRIDING SYSTEM VALUE
+VALUES (-1, 'UNKNOWN', 'DESCONOCIDO', 'DESCONOCIDA', FALSE, 'Tipo de evento no reconocido');
+
+-- Reset sequence para que los próximos inserts usen IDs正确
+SELECT setval('dim_tipo_evento_sk_tipo_evento_seq', 1, false);
+
+-- Catálogo de eventos para Stress Test
+INSERT INTO dim_tipo_evento (codigo_evento, categoria, severidad, es_critico, descripcion) VALUES
+('POWER_OUTAGE', 'INTERRUPCION', 'ALTA', TRUE, 'Corte de energía detectado por smart meter'),
+('POWER_RESTORATION', 'INTERRUPCION', 'MEDIA', FALSE, 'Restauración de energía'),
+('VOLTAGE_SPIKE', 'FLUCTUACION', 'ALTA', TRUE, 'Pico de voltaje (>260V)'),
+('VOLTAGE_SAG', 'FLUCTUACION', 'MEDIA', FALSE, 'Caída de voltaje (<180V)'),
+('HEARTBEAT', 'TELEMETRIA', 'BAJA', FALSE, 'Señal de vida del medidor'),
+('LECTURA_PERIODICA', 'TELEMETRIA', 'BAJA', FALSE, 'Lectura periódica de consumo/voltaje');
+
+-- ---------------------------------------------------------------------------
+-- staging_telemetria (ejemplos de lecturas de telemetría - últimas 24 horas)
+-- ---------------------------------------------------------------------------
+
+INSERT INTO staging_telemetria (id_medidor, timestamp_lectura, consumo_wh, voltaje, tipo_lectura) VALUES
+(1001, NOW() - INTERVAL '23 hours', 2500, 220, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '22 hours', 2300, 221, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '21 hours', 2400, 219, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '20 hours', 2350, 222, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '19 hours', 2600, 220, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '18 hours', 2800, 218, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '17 hours', 2900, 225, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '16 hours', 2700, 223, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '15 hours', 2450, 220, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '14 hours', 2300, 221, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '13 hours', 2200, 219, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '12 hours', 2100, 218, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '11 hours', 2000, 217, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '10 hours', 1950, 220, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '9 hours', 1900, 221, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '8 hours', 1850, 219, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '7 hours', 1800, 218, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '6 hours', 1750, 217, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '5 hours', 1700, 220, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '4 hours', 1650, 221, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '3 hours', 1600, 219, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '2 hours', 1550, 218, 'LECTURA_PERIODICA'),
+(1001, NOW() - INTERVAL '1 hour', 1500, 220, 'LECTURA_PERIODICA'),
+(1001, NOW(), 1450, 221, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '23 hours', 1800, 219, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '22 hours', 1750, 218, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '21 hours', 1700, 220, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '20 hours', 1650, 221, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '19 hours', 1600, 219, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '18 hours', 1550, 218, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '17 hours', 1500, 217, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '16 hours', 1450, 220, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '15 hours', 1400, 221, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '14 hours', 1350, 219, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '13 hours', 1300, 218, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '12 hours', 1250, 217, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '11 hours', 1200, 220, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '10 hours', 1150, 221, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '9 hours', 1100, 219, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '8 hours', 1050, 218, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '7 hours', 1000, 217, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '6 hours', 950, 220, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '5 hours', 900, 221, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '4 hours', 850, 219, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '3 hours', 800, 218, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '2 hours', 750, 217, 'LECTURA_PERIODICA'),
+(1002, NOW() - INTERVAL '1 hour', 700, 220, 'LECTURA_PERIODICA'),
+(1002, NOW(), 650, 221, 'LECTURA_PERIODICA');
+
+-- ---------------------------------------------------------------------------
 -- dim_geografia_urbana
 -- ---------------------------------------------------------------------------
 
