@@ -115,7 +115,34 @@ BEGIN
         ('ctrl_lotes_procesamiento', 'total_transitorios'),
         ('ctrl_lotes_procesamiento', 'estado'),
         ('ctrl_lotes_procesamiento', 'fecha_ejecucion'),
-        ('ctrl_lotes_procesamiento', 'duracion_segundos')
+        ('ctrl_lotes_procesamiento', 'duracion_segundos'),
+        -- NUEVAS tablas PR4: dim_tipo_evento
+        ('dim_tipo_evento', 'sk_tipo_evento'),
+        ('dim_tipo_evento', 'codigo_evento'),
+        ('dim_tipo_evento', 'categoria'),
+        ('dim_tipo_evento', 'severidad'),
+        ('dim_tipo_evento', 'es_critico'),
+        -- NUEVAS tablas PR4: staging_telemetria
+        ('staging_telemetria', 'id_staging'),
+        ('staging_telemetria', 'id_medidor'),
+        ('staging_telemetria', 'timestamp_lectura'),
+        ('staging_telemetria', 'consumo_wh'),
+        ('staging_telemetria', 'voltaje'),
+        ('staging_telemetria', 'tipo_lectura'),
+        ('staging_telemetria', 'procesado'),
+        -- NUEVAS tablas PR4: fact_telemetria
+        ('fact_telemetria', 'sk_telemetria'),
+        ('fact_telemetria', 'sk_tiempo'),
+        ('fact_telemetria', 'sk_red_electrica'),
+        ('fact_telemetria', 'sk_geografia_urbana'),
+        ('fact_telemetria', 'sk_tipo_evento'),
+        ('fact_telemetria', 'timestamp_lectura'),
+        ('fact_telemetria', 'consumo_kwh'),
+        ('fact_telemetria', 'voltaje'),
+        -- ACTUALIZADA PR4: fact_interrupciones ahora tiene sk_tipo_evento
+        ('fact_interrupciones', 'sk_tipo_evento'),
+        -- ACTUALIZADA PR4: err_telemetria ahora tiene tipo_error
+        ('err_telemetria', 'tipo_error')
     LOOP
         SELECT EXISTS (
             SELECT 1
@@ -181,13 +208,34 @@ BEGIN
     END IF;
     RAISE NOTICE '✓ staging_eventos: % filas.', v_count;
 
+    -- NUEVO PR4: dim_tipo_evento debe tener la fila -1 (UNKNOWN)
+    SELECT COUNT(*) INTO v_count FROM dim_tipo_evento WHERE sk_tipo_evento = -1;
+    IF v_count = 0 THEN
+        RAISE EXCEPTION 'SECCIÓN 2 FALLIDA — dim_tipo_evento no tiene la fila -1 (UNKNOWN). Ejecutar 04-datos-semilla.sql.';
+    END IF;
+    RAISE NOTICE '✓ dim_tipo_evento: fila -1 (UNKNOWN) presente.';
+
+    -- NUEVO PR4: dim_tipo_evento debe tener 6 entradas de catálogo + 1 UNKNOWN = 7 filas
+    SELECT COUNT(*) INTO v_count FROM dim_tipo_evento;
+    IF v_count < 7 THEN
+        RAISE EXCEPTION 'SECCIÓN 2 FALLIDA — dim_tipo_evento tiene % filas (esperado >= 7: -1 UNKNOWN + 6 catalog).', v_count;
+    END IF;
+    RAISE NOTICE '✓ dim_tipo_evento: % filas (6 catalog + 1 UNKNOWN).', v_count;
+
+    -- NUEVO PR4: staging_telemetria debe tener datos de muestra
+    SELECT COUNT(*) INTO v_count FROM staging_telemetria;
+    IF v_count = 0 THEN
+        RAISE EXCEPTION 'SECCIÓN 2 FALLIDA — staging_telemetria está vacía.';
+    END IF;
+    RAISE NOTICE '✓ staging_telemetria: % filas.', v_count;
+
     RAISE NOTICE '✓ SECCIÓN 2 PASADA: Todas las dimensiones y staging tienen datos.';
 END $$;
 
 
 -- =============================================================================
--- SECCIÓN 3: PRIMERA EJECUCIÓN DEL SP DE RECONCILIACIÓN
--- Propósito: procesar TODOS los eventos de staging y registrar el lote.
+-- SECCIÓN 3: EJECUCIÓN DEL SP DE TELEMTRÍA (PR4)
+-- Propósito: procesar lecturas de staging_telemetria y populate fact_telemetria.
 -- =============================================================================
 
 -- Creamos una tabla temporal para persistir los conteos entre secciones
@@ -196,6 +244,51 @@ CREATE TEMP TABLE smoke_test_state (
     key   TEXT PRIMARY KEY,
     value INTEGER
 );
+
+DO $$
+DECLARE
+    v_lote_id          INTEGER;
+    v_prev_telemetria  INTEGER;
+    v_post_telemetria  INTEGER;
+    v_staging_count    INTEGER;
+BEGIN
+    -- Registrar cuántos registros hay antes de procesar
+    SELECT COUNT(*) INTO v_prev_telemetria FROM fact_telemetria;
+    INSERT INTO smoke_test_state VALUES ('telemetria_before', v_prev_telemetria);
+
+    -- Verificar que hay datos en staging_telemetria
+    SELECT COUNT(*) INTO v_staging_count FROM staging_telemetria WHERE procesado = FALSE;
+    IF v_staging_count = 0 THEN
+        RAISE NOTICE '⚠ staging_telemetria no tiene registros pendientes (procesado=FALSE). Saltando ejecución de SP.';
+    ELSE
+        RAISE NOTICE '✓ staging_telemetria: % registros pendientes por procesar.', v_staging_count;
+    END IF;
+
+    -- Ejecutar el SP de reconciliación de telemetría
+    CALL sp_reconciliar_telemetria();
+
+    -- Identificar el lote que acaba de crear (el más reciente)
+    SELECT MAX(id_lote) INTO v_lote_id FROM ctrl_lotes_procesamiento;
+    INSERT INTO smoke_test_state VALUES ('lote_id_telemetria', v_lote_id);
+
+    -- Verificar que fact_telemetria tiene datos nuevos
+    SELECT COUNT(*) INTO v_post_telemetria FROM fact_telemetria;
+    INSERT INTO smoke_test_state VALUES ('telemetria_after', v_post_telemetria);
+
+    IF v_post_telemetria = v_prev_telemetria AND v_staging_count > 0 THEN
+        RAISE EXCEPTION 'SECCIÓN 3 FALLIDA — fact_telemetria no creció tras ejecutar SP (antes=%, después=%).',
+            v_prev_telemetria, v_post_telemetria;
+    END IF;
+
+    RAISE NOTICE '✓ SECCIÓN 3 PASADA: SP telemetría ejecutado. fact_telemetria: % → % filas.',
+        v_prev_telemetria, v_post_telemetria;
+END $$;
+
+
+-- =============================================================================
+-- SECCIÓN 4: PRIMERA EJECUCIÓN DEL SP DE RECONCILIACIÓN (INTERRUPCIONES)
+-- Propósito: procesar TODOS los eventos de staging y registrar el lote.
+-- =============================================================================
 
 DO $$
 DECLARE
@@ -221,12 +314,12 @@ BEGIN
     SELECT COUNT(*) INTO v_total_eventos FROM err_telemetria;
     INSERT INTO smoke_test_state VALUES ('err_count_1', v_total_eventos);
 
-    RAISE NOTICE '✓ SECCIÓN 3 PASADA: SP ejecutado. Lote % completado.', v_lote_id;
+    RAISE NOTICE '✓ SECCIÓN 4 PASADA: SP ejecutado. Lote % completado.', v_lote_id;
 END $$;
 
 
 -- =============================================================================
--- SECCIÓN 4: POST-CHEQUEOS TRAS PRIMERA EJECUCIÓN
+-- SECCIÓN 5: POST-CHEQUEOS TRAS PRIMERA EJECUCIÓN DE INTERRUPCIONES
 -- Propósito: validar que el SP produjo los hechos, errores y metadatos esperados.
 -- =============================================================================
 
@@ -242,28 +335,28 @@ DECLARE
     v_unprocessed_outage INTEGER;
     v_staging_total     INTEGER;
 BEGIN
-    -- 4.1 fact_interrupciones debe tener filas
+    -- 5.1 fact_interrupciones debe tener filas
     SELECT value INTO v_fact_count FROM smoke_test_state WHERE key = 'fact_count_1';
     IF v_fact_count = 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 4 FALLIDA — fact_interrupciones está vacía después del primer SP run.';
+        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — fact_interrupciones está vacía después del primer SP run.';
     END IF;
     RAISE NOTICE '✓ fact_interrupciones: % filas.', v_fact_count;
 
-    -- 4.2 err_telemetria debe tener al menos las 5 RESTORATION huérfanas inyectadas
+    -- 5.2 err_telemetria debe tener al menos las 5 RESTORATION huérfanas inyectadas
     SELECT value INTO v_err_count FROM smoke_test_state WHERE key = 'err_count_1';
     -- NOTA: 5 huérfanas + posibles casos de doble outage consecutivo.
     -- El mínimo seguro es 5; en la práctica suele ser 8-10.
     IF v_err_count < 5 THEN
-        RAISE EXCEPTION 'SECCIÓN 4 FALLIDA — err_telemetria tiene % filas, se esperaban al menos 5 (huérfanas).', v_err_count;
+        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — err_telemetria tiene % filas, se esperaban al menos 5 (huérfanas).', v_err_count;
     END IF;
     RAISE NOTICE '✓ err_telemetria: % filas (>= 5 esperadas).', v_err_count;
 
-    -- 4.3 ctrl_lotes_procesamiento: exactamente 1 lote COMPLETADO
+    -- 5.3 ctrl_lotes_procesamiento: exactamente 1 lote COMPLETADO
     SELECT COUNT(*) INTO v_lote_count
     FROM ctrl_lotes_procesamiento
     WHERE estado = 'COMPLETADO';
     IF v_lote_count <> 1 THEN
-        RAISE EXCEPTION 'SECCIÓN 4 FALLIDA — Se esperaba 1 lote COMPLETADO, hay %.', v_lote_count;
+        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — Se esperaba 1 lote COMPLETADO, hay %.', v_lote_count;
     END IF;
 
     -- Verificar metadatos del lote
@@ -275,7 +368,7 @@ BEGIN
     RAISE NOTICE '✓ Lote 1 metadata: hechos=%, huerfanos=%, transitorios=%.',
         v_lote_hechos, v_lote_huerfanos, v_lote_transitorios;
 
-    -- 4.4 staging_eventos: validar estado de procesado
+    -- 5.4 staging_eventos: validar estado de procesado
     -- Se espera que la gran mayoría esté procesado = TRUE.
     -- Las únicas excepciones legítimas son OUTAGEs que quedaron abiertos
     -- tras la clasificación DOBLE_OUTAGE del SP (máximo 3 en este dataset).
@@ -286,24 +379,24 @@ BEGIN
     SELECT value INTO v_staging_total FROM smoke_test_state WHERE key = 'staging_total';
 
     IF v_unprocessed > 5 THEN
-        RAISE EXCEPTION 'SECCIÓN 4 FALLIDA — % eventos staging sin procesar (esperados <= 5).', v_unprocessed;
+        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — % eventos staging sin procesar (esperados <= 5).', v_unprocessed;
     END IF;
 
     -- Asegurar que los no procesados sean solo OUTAGEs abiertos (no RESTORATIONS)
     IF v_unprocessed <> v_unprocessed_outage THEN
-        RAISE EXCEPTION 'SECCIÓN 4 FALLIDA — Hay eventos no-procesados que no son POWER_OUTAGE (% RESTORATIONS sin procesar).',
+        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — Hay eventos no-procesados que no son POWER_OUTAGE (% RESTORATIONS sin procesar).',
             (v_unprocessed - v_unprocessed_outage);
     END IF;
 
     RAISE NOTICE '✓ staging_eventos: %/% procesados, % abiertos (solo OUTAGE).',
         (v_staging_total - v_unprocessed), v_staging_total, v_unprocessed;
 
-    RAISE NOTICE '✓ SECCIÓN 4 PASADA: Post-chequeos tras primera ejecución correctos.';
+    RAISE NOTICE '✓ SECCIÓN 5 PASADA: Post-chequeos tras primera ejecución correctos.';
 END $$;
 
 
 -- =============================================================================
--- SECCIÓN 5: PRUEBA DE IDEMPOTENCIA
+-- SECCIÓN 6: PRUEBA DE IDEMPOTENCIA
 -- Propósito: ejecutar el SP 2 veces más y comprobar que los conteos no cambian.
 -- Si cambian, hay un bug de duplicación en el SP o en la lógica de emparejamiento.
 -- =============================================================================
@@ -318,7 +411,7 @@ DECLARE
     v_fact_after_2  INTEGER;
     v_err_after_2   INTEGER;
     v_fact_after_3  INTEGER;
-    v_err_after_3   INTEGER;
+    v_err_after_3  INTEGER;
     v_lote2_hechos  INTEGER;
     v_lote3_hechos  INTEGER;
 BEGIN
@@ -339,15 +432,15 @@ BEGIN
     FROM ctrl_lotes_procesamiento WHERE id_lote = v_lote_id_2;
 
     IF v_fact_after_2 <> v_fact_before THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA (Run 2) — fact_interrupciones cambió: % -> %.', v_fact_before, v_fact_after_2;
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA (Run 2) — fact_interrupciones cambió: % -> %.', v_fact_before, v_fact_after_2;
     END IF;
 
     IF v_err_after_2 <> v_err_before THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA (Run 2) — err_telemetria cambió: % -> %.', v_err_before, v_err_after_2;
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA (Run 2) — err_telemetria cambió: % -> %.', v_err_before, v_err_after_2;
     END IF;
 
     IF v_lote2_hechos <> 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA (Run 2) — Lote % debería tener total_hechos=0 (idempotencia), tiene %.', v_lote_id_2, v_lote2_hechos;
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA (Run 2) — Lote % debería tener total_hechos=0 (idempotencia), tiene %.', v_lote_id_2, v_lote2_hechos;
     END IF;
 
     RAISE NOTICE '✓ Run 2 idempotente: lote % con 0 hechos nuevos.', v_lote_id_2;
@@ -364,33 +457,33 @@ BEGIN
     FROM ctrl_lotes_procesamiento WHERE id_lote = v_lote_id_3;
 
     IF v_fact_after_3 <> v_fact_before THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA (Run 3) — fact_interrupciones cambió: % -> %.', v_fact_before, v_fact_after_3;
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA (Run 3) — fact_interrupciones cambió: % -> %.', v_fact_before, v_fact_after_3;
     END IF;
 
     IF v_err_after_3 <> v_err_before THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA (Run 3) — err_telemetria cambió: % -> %.', v_err_before, v_err_after_3;
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA (Run 3) — err_telemetria cambió: % -> %.', v_err_before, v_err_after_3;
     END IF;
 
     IF v_lote3_hechos <> 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA (Run 3) — Lote % debería tener total_hechos=0, tiene %.', v_lote_id_3, v_lote3_hechos;
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA (Run 3) — Lote % debería tener total_hechos=0, tiene %.', v_lote_id_3, v_lote3_hechos;
     END IF;
 
-    -- 4.2 Validar que los lotes son consecutivos y los 2 últimos tienen 0 hechos
+    -- 6.1 Validar que los lotes son consecutivos y los 2 últimos tienen 0 hechos
     IF NOT (v_lote_id_2 = v_lote_id_1 + 1
         AND v_lote_id_3 = v_lote_id_2 + 1
         AND v_lote2_hechos = 0
         AND v_lote3_hechos = 0) THEN
-        RAISE EXCEPTION 'SECCIÓN 5 FALLIDA — Lotes no consecutivos (base=%, run2=%, run3=%) o con hechos ≠ 0 (run2=%, run3=%).',
+        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — Lotes no consecutivos (base=%, run2=%, run3=%) o con hechos ≠ 0 (run2=%, run3=%).',
             v_lote_id_1, v_lote_id_2, v_lote_id_3, v_lote2_hechos, v_lote3_hechos;
     END IF;
 
     RAISE NOTICE '✓ Run 3 idempotente: lote % con 0 hechos nuevos.', v_lote_id_3;
-    RAISE NOTICE '✓ SECCIÓN 5 PASADA: Idempotencia probada en 3 ejecuciones consecutivas.';
+    RAISE NOTICE '✓ SECCIÓN 6 PASADA: Idempotencia probada en 3 ejecuciones consecutivas.';
 END $$;
 
 
 -- =============================================================================
--- SECCIÓN 6: ZERO-FALLBACK — Verificar que el SP no generó filas DESCONOCIDO
+-- SECCIÓN 7: ZERO-FALLBACK — Verificar que el SP no generó filas DESCONOCIDO
 -- Propósito: garantizar que la resolución de SKs no dependió de dimensiones
 -- de respaldo (fallback) para ningún evento del lote base.
 -- =============================================================================
@@ -402,95 +495,104 @@ BEGIN
     SELECT COUNT(*) INTO v_count FROM dim_red_electrica
     WHERE codigo_medidor LIKE '%DESCONOCIDO%';
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_red_electrica tiene % filas con codigo_medidor DESCONOCIDO.', v_count;
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_red_electrica tiene % filas con codigo_medidor DESCONOCIDO.', v_count;
     END IF;
 
     SELECT COUNT(*) INTO v_count FROM dim_geografia_urbana
     WHERE sector_urbano LIKE '%DESCONOCIDO%';
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_geografia_urbana tiene % filas con sector_urbano DESCONOCIDO.', v_count;
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_geografia_urbana tiene % filas con sector_urbano DESCONOCIDO.', v_count;
     END IF;
 
     SELECT COUNT(*) INTO v_count FROM dim_geografia_urbana
     WHERE distrito LIKE '%DESCONOCIDO%';
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_geografia_urbana tiene % filas con distrito DESCONOCIDO.', v_count;
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_geografia_urbana tiene % filas con distrito DESCONOCIDO.', v_count;
     END IF;
 
     SELECT COUNT(*) INTO v_count FROM dim_red_electrica
     WHERE transformador LIKE '%DESCONOCIDO%';
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_red_electrica tiene % filas con transformador DESCONOCIDO.', v_count;
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_red_electrica tiene % filas con transformador DESCONOCIDO.', v_count;
     END IF;
 
     SELECT COUNT(*) INTO v_count FROM dim_red_electrica
     WHERE circuito LIKE '%DESCONOCIDO%';
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_red_electrica tiene % filas con circuito DESCONOCIDO.', v_count;
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_red_electrica tiene % filas con circuito DESCONOCIDO.', v_count;
     END IF;
 
     SELECT COUNT(*) INTO v_count FROM dim_red_electrica
     WHERE subestacion LIKE '%DESCONOCIDO%';
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_red_electrica tiene % filas con subestacion DESCONOCIDO.', v_count;
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_red_electrica tiene % filas con subestacion DESCONOCIDO.', v_count;
     END IF;
 
     SELECT COUNT(*) INTO v_count FROM dim_clientes_inventario
     WHERE total_clientes_servidos = 1
       AND fecha_inicio = '2020-01-01 00:00:00+00'::TIMESTAMPTZ;
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 6 FALLIDA — dim_clientes_inventario tiene % fila(s) de fallback (total_clientes_servidos=1).', v_count;
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_clientes_inventario tiene % fila(s) de fallback (total_clientes_servidos=1).', v_count;
     END IF;
 
-    RAISE NOTICE '✓ SECCIÓN 6 PASADA: Zero fallback dimension rows (0 DESCONOCIDO en todas las tablas).';
+    -- NUEVO PR4: Verificar que dim_tipo_evento tiene la fila -1 (UNKNOWN) que es el fallback válido
+    -- Esta es la UNICA fila de fallback permitida en dim_tipo_evento
+    SELECT COUNT(*) INTO v_count FROM dim_tipo_evento WHERE sk_tipo_evento = -1;
+    IF v_count = 0 THEN
+        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — dim_tipo_evento no tiene la fila -1 (UNKNOWN) que es el fallback obligatorio.';
+    END IF;
+    RAISE NOTICE '✓ dim_tipo_evento: fila -1 (UNKNOWN) presente como fallback válido.';
+
+    RAISE NOTICE '✓ SECCIÓN 7 PASADA: Zero fallback dimension rows (0 DESCONOCIDO en todas las tablas).';
 END $$;
 
 
 -- =============================================================================
--- SECCIÓN 7: VALIDACIÓN DE VISTAS ANALÍTICAS
+-- SECCIÓN 8: VALIDACIÓN DE VISTAS ANALÍTICAS
 -- Propósito: garantizar que las vistas de explotación (Power BI) devuelven datos.
 -- =============================================================================
 
 DO $$
 DECLARE
-    v_count    INTEGER;
-    v_umbral   NUMERIC;
-    v_med_days INTEGER;
-    v_data_anio INTEGER;
+    v_count       INTEGER;
+    v_umbral      NUMERIC;
+    v_med_days    INTEGER;
+    v_data_anio   INTEGER;
+    v_has_columns BOOLEAN;
 BEGIN
-    -- 7.1 vw_saidi_saifi_mensual debe devolver filas
+    -- 8.1 vw_saidi_saifi_mensual debe devolver filas
     SELECT COUNT(*) INTO v_count FROM vw_saidi_saifi_mensual;
     IF v_count = 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — vw_saidi_saifi_mensual devolvió 0 filas.';
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_saidi_saifi_mensual devolvió 0 filas.';
     END IF;
     RAISE NOTICE '✓ vw_saidi_saifi_mensual: % filas.', v_count;
 
-    -- 7.2 fn_calcular_umbral_med() debe ser > 0
+    -- 8.2 fn_calcular_umbral_med() debe ser > 0
     SELECT fn_calcular_umbral_med() INTO v_umbral;
     IF v_umbral IS NULL OR v_umbral <= 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — fn_calcular_umbral_med() devolvió % (esperado > 0).', v_umbral;
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — fn_calcular_umbral_med() devolvió % (esperado > 0).', v_umbral;
     END IF;
     RAISE NOTICE '✓ fn_calcular_umbral_med(): %.', v_umbral;
 
-    -- 7.3 vw_saidi_saifi_con_med debe tener al menos 1 día MED
+    -- 8.3 vw_saidi_saifi_con_med debe tener al menos 1 día MED
     SELECT COUNT(*) INTO v_med_days
     FROM vw_saidi_saifi_con_med
     WHERE es_med = TRUE;
     IF v_med_days = 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — vw_saidi_saifi_con_med tiene 0 días MED (esperado >= 1). Revise que los datos semilla incluyan eventos catastróficos.';
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_saidi_saifi_con_med tiene 0 días MED (esperado >= 1). Revise que los datos semilla incluyan eventos catastróficos.';
     END IF;
     RAISE NOTICE '✓ vw_saidi_saifi_con_med: % días MED.', v_med_days;
 
-    -- 7.4 vw_heatmap_interrupciones debe tener datos en horas pico (18-22)
+    -- 8.4 vw_heatmap_interrupciones debe tener datos en horas pico (18-22)
     SELECT COUNT(*) INTO v_count
     FROM vw_heatmap_interrupciones
     WHERE hora BETWEEN 18 AND 22;
     IF v_count = 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — vw_heatmap_interrupciones no tiene filas en horas pico (18-22). Verifique que los datos semilla generen eventos en ese rango horario.';
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_heatmap_interrupciones no tiene filas en horas pico (18-22). Verifique que los datos semilla generen eventos en ese rango horario.';
     END IF;
     RAISE NOTICE '✓ vw_heatmap_interrupciones: % filas en horas pico (18-22).', v_count;
 
-    -- 7.5 vw_ranking_subestaciones
+    -- 8.5 vw_ranking_subestaciones
     -- NOTA: esta vista filtra por anio = EXTRACT(YEAR FROM NOW()).
     -- Si los datos semilla son de un año distinto al actual, la vista devuelve 0.
     -- Para hacer el test robusto, detectamos el año de los datos y validamos
@@ -500,56 +602,91 @@ BEGIN
     FROM vw_saidi_saifi_mensual
     WHERE subestacion IS NOT NULL AND anio = v_data_anio;
     IF v_count <> 3 THEN
-        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — Se esperaban 3 subestaciones distintas en los datos (año %), se encontraron %.', v_data_anio, v_count;
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — Se esperaban 3 subestaciones distintas en los datos (año %), se encontraron %.', v_data_anio, v_count;
     END IF;
     RAISE NOTICE '✓ Subestaciones encontradas en datos (año %): %.', v_data_anio, v_count;
 
-    -- 7.6 vw_auditoria_errores debe tener filas (los huérfanos del lote 1)
+    -- 8.6 vw_auditoria_errores debe tener filas (los huérfanos del lote 1)
     SELECT COUNT(*) INTO v_count FROM vw_auditoria_errores;
     IF v_count = 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — vw_auditoria_errores devolvió 0 filas.';
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_auditoria_errores devolvió 0 filas.';
     END IF;
     RAISE NOTICE '✓ vw_auditoria_errores: % filas.', v_count;
 
-    -- 7.7 vw_monitoreo_elt debe tener filas (los 3 lotes ejecutados)
+    -- 8.7 vw_monitoreo_elt debe tener filas (los 3 lotes ejecutados)
     SELECT COUNT(*) INTO v_count FROM vw_monitoreo_elt;
     IF v_count = 0 THEN
-        RAISE EXCEPTION 'SECCIÓN 7 FALLIDA — vw_monitoreo_elt devolvió 0 filas.';
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_monitoreo_elt devolvió 0 filas.';
     END IF;
     RAISE NOTICE '✓ vw_monitoreo_elt: % filas.', v_count;
 
-    RAISE NOTICE '✓ SECCIÓN 7 PASADA: Todas las vistas analíticas devuelven datos esperados.';
+    -- 8.8 NUEVO PR4: vw_consumo_diario debe devolver datos (telemetría)
+    SELECT COUNT(*) INTO v_count FROM vw_consumo_diario;
+    IF v_count = 0 THEN
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_consumo_diario devolvió 0 filas.';
+    END IF;
+    RAISE NOTICE '✓ vw_consumo_diario: % filas.', v_count;
+
+    -- 8.9 NUEVO PR4: vw_voltaje_tendencia debe devolver datos (telemetría)
+    SELECT COUNT(*) INTO v_count FROM vw_voltaje_tendencia;
+    IF v_count = 0 THEN
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_voltaje_tendencia devolvió 0 filas.';
+    END IF;
+    RAISE NOTICE '✓ vw_voltaje_tendencia: % filas.', v_count;
+
+    -- 8.10 NUEVO PR4: vw_saidi_saifi_diario debe incluir categoria, severidad, es_critico
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'vw_saidi_saifi_diario'
+          AND column_name IN ('categoria', 'severidad', 'es_critico')
+        HAVING COUNT(*) = 3
+    ) INTO v_has_columns;
+    IF NOT v_has_columns THEN
+        RAISE EXCEPTION 'SECCIÓN 8 FALLIDA — vw_saidi_saifi_diario no tiene las columnas categoria/severidad/es_critico.';
+    END IF;
+    RAISE NOTICE '✓ vw_saidi_saifi_diario: columnas categoria/severidad/es_critico presentes.';
+
+    RAISE NOTICE '✓ SECCIÓN 8 PASADA: Todas las vistas analíticas devuelven datos esperados.';
 END $$;
 
 
 -- =============================================================================
--- SECCIÓN 8: RESUMEN FINAL
+-- SECCIÓN 9: RESUMEN FINAL
 -- =============================================================================
 
 DO $$
 DECLARE
-    v_lote1 INTEGER;
-    v_lote2 INTEGER;
-    v_lote3 INTEGER;
-    v_facts INTEGER;
-    v_errors INTEGER;
+    v_lote1        INTEGER;
+    v_lote2        INTEGER;
+    v_lote3        INTEGER;
+    v_lote_telem   INTEGER;
+    v_facts        INTEGER;
+    v_errors       INTEGER;
+    v_telem_before INTEGER;
+    v_telem_after  INTEGER;
 BEGIN
     SELECT value INTO v_lote1 FROM smoke_test_state WHERE key = 'lote_id_1';
     SELECT value INTO v_lote2 FROM smoke_test_state WHERE key = 'lote_id_2';
     SELECT value INTO v_lote3 FROM smoke_test_state WHERE key = 'lote_id_3';
+    SELECT value INTO v_lote_telem FROM smoke_test_state WHERE key = 'lote_id_telemetria';
     SELECT value INTO v_facts FROM smoke_test_state WHERE key = 'fact_count_1';
     SELECT value INTO v_errors FROM smoke_test_state WHERE key = 'err_count_1';
+    SELECT value INTO v_telem_before FROM smoke_test_state WHERE key = 'telemetria_before';
+    SELECT value INTO v_telem_after FROM smoke_test_state WHERE key = 'telemetria_after';
 
     RAISE NOTICE '';
     RAISE NOTICE '═══════════════════════════════════════════════════════════════';
     RAISE NOTICE '                  SMOKE TEST COMPLETADO CON ÉXITO               ';
     RAISE NOTICE '═══════════════════════════════════════════════════════════════';
-    RAISE NOTICE ' Lotes ejecutados    : %, %, %', v_lote1, v_lote2, v_lote3;
-    RAISE NOTICE ' Hechos generados    : %', v_facts;
-    RAISE NOTICE ' Errores aislados    : %', v_errors;
-    RAISE NOTICE ' Idempotencia        : VERIFICADA (3 ejecuciones, 0 duplicados)';
-    RAISE NOTICE ' Fallback dimensiones: 0 (zero DESCONOCIDO rows)';
-    RAISE NOTICE ' Vistas analíticas   : TODAS ACTIVAS';
+    RAISE NOTICE ' Lotes interrump. ejecutados: %, %, %', v_lote1, v_lote2, v_lote3;
+    RAISE NOTICE ' Lote telemetría            : %', v_lote_telem;
+    RAISE NOTICE ' Interrupciones generadas   : %', v_facts;
+    RAISE NOTICE ' Errores aislados           : %', v_errors;
+    RAISE NOTICE ' Telemetría procesada       : % → % filas',
+        v_telem_before, v_telem_after;
+    RAISE NOTICE ' Idempotencia               : VERIFICADA (3 ejecuciones, 0 duplicados)';
+    RAISE NOTICE ' Fallback dimensiones       : 0 (zero DESCONOCIDO rows)';
+    RAISE NOTICE ' Vistas analíticas          : TODAS ACTIVAS (incl. PR4)';
     RAISE NOTICE '═══════════════════════════════════════════════════════════════';
 END $$;
 

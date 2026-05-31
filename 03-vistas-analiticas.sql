@@ -67,6 +67,11 @@ SELECT
     dt.dia,
     dt.timestamp_completo::DATE                              AS fecha,
 
+    -- NUEVO: Atributos de tipo de evento (para slicers en Power BI)
+    dte.categoria,
+    dte.severidad,
+    dte.es_critico,
+
     -- Métricas de interrupción
     COUNT(fi.sk_interrupcion)                                AS total_interrupciones,
     COALESCE(SUM(fi.duracion_minutos * fi.clientes_afectados), 0)
@@ -102,6 +107,8 @@ FROM dim_tiempo dt
 LEFT JOIN fact_interrupciones fi
     ON fi.sk_tiempo = dt.sk_tiempo
     AND fi.excluido_med = FALSE
+LEFT JOIN dim_tipo_evento dte
+    ON fi.sk_tipo_evento = dte.sk_tipo_evento
 LEFT JOIN dim_clientes_inventario ci
     ON ci.fecha_inicio <= dt.timestamp_completo
     AND (ci.fecha_fin IS NULL OR ci.fecha_fin > dt.timestamp_completo)
@@ -109,12 +116,107 @@ LEFT JOIN dim_clientes_inventario ci
 
 GROUP BY
     dt.anio, dt.mes, dt.nombre_mes, dt.trimestre,
-    dt.dia, dt.timestamp_completo::DATE
+    dt.dia, dt.timestamp_completo::DATE,
+    dte.categoria, dte.severidad, dte.es_critico
 
 ORDER BY fecha DESC;
 
 COMMENT ON VIEW vw_saidi_saifi_diario IS
-'SAIDI/SAIFI diario base con denominador SCD Tipo 2. Fuente para MED y agregaciones.';
+'SAIDI/SAIFI diario base con denominador SCD Tipo 2. JOIN dim_tipo_evento para filtrado por severidad.';
+
+
+-- =============================================================================
+-- NUEVA VISTA: Agregación diaria de consumo energético por geography
+-- =============================================================================
+
+/*
+Vista analítica para consumo energético con drill-down por geografía.
+Usa GROUPING SETS para permitir agregación multinivel:
+  - Nivel completo: subestacion + circuito + sector_urbano
+  - Nivel circuito: subestacion + circuito
+  - Nivel subestacion: subestacion
+  - Nivel ciudad: solo fecha
+
+El campo fecha se incluye explícitamente en cada nivel para que Power BI
+pueda filtrar por rango de fechas sin ambigüedad.
+*/
+CREATE OR REPLACE VIEW vw_consumo_diario AS
+SELECT
+    dt.anio,
+    dt.mes,
+    dt.dia,
+    dt.timestamp_completo::DATE                              AS fecha,
+    dre.subestacion,
+    dre.circuito,
+    dgu.sector_urbano,
+    COUNT(ft.sk_telemetria)                                  AS total_lecturas,
+    SUM(ft.consumo_kwh)                                     AS consumo_total_kwh,
+    AVG(ft.consumo_kwh)                                     AS consumo_promedio_kwh,
+    MAX(ft.consumo_kwh)                                     AS consumo_maximo_kwh,
+    MIN(ft.consumo_kwh)                                     AS consumo_minimo_kwh
+FROM fact_telemetria ft
+JOIN dim_tiempo dt ON ft.sk_tiempo = dt.sk_tiempo
+JOIN dim_red_electrica dre ON ft.sk_red_electrica = dre.sk_red_electrica
+JOIN dim_geografia_urbana dgu ON ft.sk_geografia_urbana = dgu.sk_geografia_urbana
+GROUP BY
+    GROUPING SETS (
+        (dt.anio, dt.mes, dt.dia, fecha, dre.subestacion, dre.circuito, dgu.sector_urbano),
+        (dt.anio, dt.mes, dt.dia, fecha, dre.subestacion, dre.circuito),
+        (dt.anio, dt.mes, dt.dia, fecha, dre.subestacion),
+        (dt.anio, dt.mes, dt.dia, fecha)
+    )
+ORDER BY fecha DESC;
+
+COMMENT ON VIEW vw_consumo_diario IS
+'Agregación diaria de consumo por geografía. Drill-down: fecha → subestacion → circuito → sector_urbano.';
+
+
+-- =============================================================================
+-- NUEVA VISTA: Tendencia de voltaje por transformador con detección de anomalías
+-- =============================================================================
+
+/*
+Vista analítica para monitoreo de calidad de voltaje.
+Detecta transformadores con fluctuación excesiva (desviación > 5% del promedio).
+Usa GROUPING SETS para agregación multinivel por geografía:
+  - Nivel transformador: subestacion + circuito + transformador
+  - Nivel circuito: subestacion + circuito
+  - Nivel subestacion: subestacion
+  - Nivel mes: solo anio + mes
+
+El flag fluctuacion_excesiva permite filtrar en Power BI para identificar
+transformadores que requieren mantenimiento correctivo.
+*/
+CREATE OR REPLACE VIEW vw_voltaje_tendencia AS
+SELECT
+    dt.anio,
+    dt.mes,
+    dre.subestacion,
+    dre.circuito,
+    dre.transformador,
+    COUNT(ft.sk_telemetria)                                  AS total_lecturas,
+    ROUND(AVG(ft.voltaje)::NUMERIC, 2)                       AS voltaje_promedio,
+    ROUND(STDDEV(ft.voltaje)::NUMERIC, 2)                    AS voltaje_desviacion,
+    MIN(ft.voltaje)                                          AS voltaje_minimo,
+    MAX(ft.voltaje)                                          AS voltaje_maximo,
+    CASE
+        WHEN STDDEV(ft.voltaje) / NULLIF(AVG(ft.voltaje), 0) > 0.05
+        THEN TRUE ELSE FALSE
+    END                                                      AS fluctuacion_excesiva
+FROM fact_telemetria ft
+JOIN dim_tiempo dt ON ft.sk_tiempo = dt.sk_tiempo
+JOIN dim_red_electrica dre ON ft.sk_red_electrica = dre.sk_red_electrica
+GROUP BY
+    GROUPING SETS (
+        (dt.anio, dt.mes, dre.subestacion, dre.circuito, dre.transformador),
+        (dt.anio, dt.mes, dre.subestacion, dre.circuito),
+        (dt.anio, dt.mes, dre.subestacion),
+        (dt.anio, dt.mes)
+    )
+ORDER BY dt.anio DESC, dt.mes DESC;
+
+COMMENT ON VIEW vw_voltaje_tendencia IS
+'Tendencia de voltaje por transformador. Flag fluctuacion_excesiva para alertas de mantenimiento.';
 
 
 -- =============================================================================
