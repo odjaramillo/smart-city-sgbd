@@ -105,7 +105,11 @@ def parse_ddl(path: str) -> dict:
             if re.search(r"GENERATED\s+ALWAYS\s+AS\s+IDENTITY", line, re.I):
                 continue
             # Ignorar columnas con DEFAULT NOW() — el motor las rellena al omitirlas
+            # EXCEPCIÓN: fecha_inicio en dim_red_electrica debe ser explícita
             if re.search(r"DEFAULT\s+NOW\s*\(\s*\)", line, re.I):
+                if col_name == "fecha_inicio" and table == "dim_red_electrica":
+                    columns.append(col_name)  # Incluir explícitamente
+                    continue
                 continue
             columns.append(col_name)
 
