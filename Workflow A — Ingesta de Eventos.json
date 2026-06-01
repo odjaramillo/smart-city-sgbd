@@ -1,0 +1,142 @@
+{
+  "name": "A — Ingesta de Eventos",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ingesta-eventos",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b3bd085b-5f1b-454e-b0f9-e7ae7a3587f6",
+      "name": "Webhook Eventos",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "83c2408f-40d4-4bda-881c-05017e968d8b"
+    },
+    {
+      "parameters": {
+        "jsCode": "const TIPOS = ['POWER_OUTAGE','POWER_RESTORATION','VOLTAGE_SPIKE','VOLTAGE_SAG','HEARTBEAT','UNKNOWN'];\nconst entrada = Array.isArray($json.body) ? $json.body : ($json.body ? [$json.body] : [$json]);\nreturn entrada.map((e) => {\n  const id_medidor = parseInt(e.id_medidor ?? e.meter_id, 10);\n  const ts = e.timestamp_evento ?? e.timestamp ?? new Date().toISOString();\n  let tipo = String(e.tipo_evento ?? e.type ?? '').toUpperCase().trim();\n  if (!TIPOS.includes(tipo)) tipo = 'UNKNOWN';\n  if (!Number.isInteger(id_medidor)) {\n    throw new Error('id_medidor inválido: ' + JSON.stringify(e));\n  }\n  return { json: {\n    id_medidor,\n    timestamp_evento: new Date(ts).toISOString(),\n    tipo_evento: tipo,\n    procesado: false\n  }};\n});"
+      },
+      "id": "26a44bc1-87d8-4e8f-8cb4-74c5e5f497c5",
+      "name": "Normalizar Eventos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "staging_eventos"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id_medidor": "={{ $json.id_medidor }}",
+            "timestamp_evento": "={{ $json.timestamp_evento }}",
+            "tipo_evento": "={{ $json.tipo_evento }}",
+            "procesado": "={{ $json.procesado }}"
+          }
+        },
+        "options": {
+          "skipOnConflict": true
+        }
+      },
+      "id": "f2000e11-1457-479e-add2-48b6ea0e8581",
+      "name": "Insert staging_eventos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        448,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "g1x79rCOYSA9nt0S",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {\"recibidos\": $items().length, \"estado\": \"en_staging\"} }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "08bba87b-88da-4d9d-a7c1-20591a39e533",
+      "name": "Responder Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        672,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Eventos": {
+      "main": [
+        [
+          {
+            "node": "Normalizar Eventos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar Eventos": {
+      "main": [
+        [
+          {
+            "node": "Insert staging_eventos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert staging_eventos": {
+      "main": [
+        [
+          {
+            "node": "Responder Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "89a4d80e-5863-416e-876c-fbbaf1b155e6",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "5cb3db85aecd95aef1b9b15298068769c161a4d757c9512e4eb9e90375e45a5b"
+  },
+  "id": "WQTGR1TezR10XUXG",
+  "tags": []
+}
