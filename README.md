@@ -143,16 +143,18 @@ Power BI   →  SELECT sobre vistas analíticas                   (L = Load)
 
 ```
 smart-city-sgbd/
-├── 01-ddl-modelo-estrella.sql    ← Schema DDL completo (CREATE TABLE, INDEX, COMMENT)
-├── 02-sp-reconciliacion-elt.sql  ← SP idempotentes + wrappers JSON para n8n
-├── 03-vistas-analiticas.sql      ← 8+ vistas para Power BI
-├── 04-datos-semilla.sql          ← Datos de prueba (generados por script Python)
-├── 05-verificacion-smoke-test.sql← Protocolo de verificación post-deploy
-├── generar_datos_semilla.py      ← Generador determinista de datos de prueba
-├── docker-compose.yml            ← PostgreSQL 16 local
-├── init-scripts/                 ← Scripts para inicialización automática del contenedor
-├── openspec/                     ← SDD artifacts (spec, design, tasks)
-└── proyecto.md                   ← Consignas originales del proyecto
+├── 01-ddl-modelo-estrella.sql       ← Schema DDL completo (CREATE TABLE, INDEX, COMMENT)
+├── 02-sp-reconciliacion-elt.sql     ← SP idempotentes + wrappers JSON para n8n
+├── 03-vistas-analiticas.sql         ← 9 vistas para Power BI + funciones MED
+├── 04-datos-semilla.sql             ← Datos de prueba (generados por script Python)
+├── 05-verificacion-smoke-test.sql   ← Protocolo de verificación post-deploy
+├── generar_datos_semilla.py         ← Generador determinista de datos de prueba
+├── docker-compose.yml               ← PostgreSQL 16 local
+├── init-scripts/                    ← Scripts para inicialización automática del contenedor
+├── scripts/                         ← Scripts de utilidad (reset-db)
+├── Workflow A — Ingesta de Eventos.json
+├── Workflow B — Ingesta de Telemetría.json
+└── Workflow C — Reconciliación Programada.json
 ```
 
 ---
@@ -209,7 +211,7 @@ psql -h localhost -U ucab -d ucab_project -f 05-verificacion-smoke-test.sql
 
 Todas las secciones deben mostrar `✓ PASADA`. Si alguna falla, el mensaje indica exactamente cuál tabla o columna tiene el problema.
 
-### 5.3 Regenerar datos de prueba
+### 5.5 Regenerar datos de prueba
 
 ```bash
 # Generar 60 días, 300 medidores, seed=42 (reproducible)
@@ -218,6 +220,88 @@ python generar_datos_semilla.py --days 60 --meters 300 --seed 42
 # Luego recargar
 psql -h localhost -U <user> -d <db> -f 04-datos-semilla.sql
 ```
+
+---
+
+## 6. Lógica de los Stored Procedures
+
+### `sp_reconciliar_interrupciones`
+
+El SP más importante del sistema. Procesa eventos de staging en cada lote:
+
+```
+staging_eventos (crudo)
+      │
+      ▼  BLOQUE 1
+  Detectar RESTORATION huérfanas
+  → err_telemetria y marcar procesado
+      │
+      ▼  BLOQUE 2 (cursor)
+  Por cada medidor, ordenado por timestamp:
+  ┌──────────────────────────────────────┐
+  │ OUTAGE + RESTORATION → PAR VÁLIDO    │──▶ fact_interrupciones
+  │   ¿duración < 5 min? → TRANSITORIO   │──▶ se salta (no va a fact)
+  │   ¿ya existe? → DUPLICADO            │──▶ se salta (idempotencia)
+  │                                      │
+  │ OUTAGE solo → OUTAGE_ABIERTO         │──▶ se deja para próximo lote
+  │                                      │
+  │ RESTORATION sola → RESTAURACIÓN      │
+  │ (escapó del BLOQUE 1)                │──▶ err_telemetria
+  │                                      │
+  │ DOS OUTAGE seguidas → DOBLE_OUTAGE   │──▶ err_telemetria
+  │                                      │
+  │ DOS RESTORATION seguidas → DOBLE     │
+  │ RESTAURACIÓN                         │──▶ err_telemetria
+  └──────────────────────────────────────┘
+      │
+      ▼  BLOQUE 3
+  Actualizar ctrl_lotes_procesamiento
+  RAISE NOTICE con resumen
+```
+
+**Idempotencia**: si ejecutás el SP 10 veces, produce el mismo resultado que 1 vez. Los eventos ya procesados tienen `procesado = TRUE`.
+
+### `sp_reconciliar_telemetria`
+
+Más simple, basado en conjunto (no cursor):
+
+```
+staging_telemetria (crudo)
+      │
+      ▼  BLOQUE 1: Validaciones
+  ┌──────────────────────────────────┐
+  │ Medidor inactivo?                │──▶ err_telemetria + procesado
+  │ Consumo negativo (<0)?           │──▶ err_telemetria + procesado
+  │ Voltaje fuera de rango (0-1000)? │──▶ err_telemetria (aviso, NO excluye)
+  └──────────────────────────────────┘
+      │
+      ▼  BLOQUE 2: Bulk INSERT
+  INSERT INTO fact_telemetria ... SELECT ...
+  JOIN dim_fecha + dim_tiempo + dim_red_electrica
+  ON CONFLICT (sk_red_electrica, sk_fecha, sk_tiempo) DO NOTHING
+      │
+      ▼  BLOQUE 3: Marcar procesados + auditoría
+```
+
+### Wrapper JSON para n8n
+
+`fn_reconciliar_interrupciones()` y `fn_reconciliar_telemetria()` devuelven JSONB:
+
+```json
+{"estado": "COMPLETADO", "lote_id": 1, "total_hechos": 42, "total_eventos": 97, ...}
+```
+
+### MED Days (IEEE 1366, método 2.5 Beta)
+
+Días catastróficos (tormentas, apagones masivos) que distorsionan los indicadores. El algoritmo:
+
+1. Calcular SAIDI diario para todo el histórico
+2. Tomar ln(SAIDI) de los días con SAIDI > 0
+3. α = media, β = desviación estándar de los ln
+4. **Umbral T_MED = exp(α + 2.5 × β)**
+5. Días con SAIDI > T_MED → Major Event Day
+
+Implementado en `fn_calcular_umbral_med()` (STABLE, se optimiza en subconsultas).
 
 ---
 
@@ -266,7 +350,7 @@ n8n recibe HTTP POST de los medidores → insert en staging_eventos
 ```
 
 ```sql
--- Wrapper JSON que retorna resumen del lote (para监控)
+-- Wrapper JSON que retorna resumen del lote (para monitoreo)
 SELECT * FROM fn_reconciliar_interrupciones(NULL, NULL);
 ```
 
@@ -421,7 +505,56 @@ SAIFI YTD = TOTALYTD([SAIFI], dim_tiempo[fecha])
 
 ---
 
-## 12. Convenciones de equipo
+## 13. Justificación de decisiones técnicas
+
+### ¿Por qué PostgreSQL y no Python/Pandas?
+
+PostgreSQL es un **motor de conjuntos**. Un `SELECT ... JOIN ... GROUP BY` procesa millones de filas con índices BRIN sin mover datos a memoria externa. Mover datos a n8n para transformarlos y devolverlos sería un antipatrón de latencia y costo de red.
+
+### ¿Por qué esquema estrella y no 3NF?
+
+Power BI (y cualquier herramienta BI) funciona órdenes de magnitud mejor con esquemas en estrella. El modelo 3NF normaliza pero hace que cada consulta requiera 12 JOINs. En estrella, las tablas de hechos se unen a dimensiones desnormalizadas en 1-2 JOINs.
+
+### ¿Por qué SCD Tipo 2 en clientes?
+
+Si el inventario de clientes cambia, un SAIDI de 2023 debe usar el total de clientes de 2023, no el actual. SCD Tipo 2 mantiene la historia con `[fecha_inicio, fecha_fin)`.
+
+### ¿Por qué ELT y no ETL?
+
+La transformación ocurre **dentro de PostgreSQL**, no en n8n. Esto es deliberado:
+
+| Capa | Qué hace | Dónde |
+|------|----------|-------|
+| **E**xtract | n8n recibe HTTP POST de medidores | n8n webhook |
+| **L**oad | n8n INSERT en tablas staging | PostgreSQL staging |
+| **T**ransform | SPs procesan lotes dentro de la DB | PostgreSQL SP |
+| **L**oad (analítico) | Power BI consume vistas | PostgreSQL views |
+
+**Ventaja**: PostgreSQL procesa conjuntos de datos órdenes de magnitud más rápido que mover datos a n8n y volver.
+
+### Idempotencia
+
+Si n8n llama al SP 5 veces porque hubo un timeout falso, la 2da ejecución produce 0 hechos nuevos. Los eventos ya procesados tienen `procesado = TRUE`, y los `ON CONFLICT DO NOTHING` previenen duplicados.
+
+---
+
+## 14. Escenarios de borde
+
+| Escenario | Dónde se prueba | Qué demuestra |
+|-----------|----------------|---------------|
+| OUTAGE + RESTORATION normal | Ingesta de eventos | Happy path |
+| Duración < 5 min | Transitorio (< 5 min) | Filtro IEEE 1366 (transitorios no cuentan para SAIDI) |
+| RESTORATION sin OUTAGE | Huérfana | Detección de huérfanos → err_telemetria |
+| Tipo inválido (`TERREMOTO`) | Tipo desconocido | Normalización a UNKNOWN + logging |
+| Voltaje > 260V | Telemetría anómala | Advertencia en err_telemetria (no excluye del hecho) |
+| Consumo negativo | Telemetría inválida | Validación del SP → err_telemetria (excluido) |
+| Idempotencia | Ejecutar SP 2 veces | 0 hechos nuevos en la 2da ejecución |
+| SCD Tipo 2 | Seed: 2 versiones de inventario | Denominador dinámico SAIDI |
+| MED Days | Datos históricos | Exclusión de días catastróficos del KPI rutinario |
+
+---
+
+## 15. Convenciones de equipo
 
 ### Ramas y PRs
 
@@ -446,7 +579,7 @@ docs(readme): agregar sección de integración n8n
 
 ---
 
-## 13. Comandos útiles
+## 16. Comandos útiles
 
 ```bash
 # Ver logs del contenedor
@@ -474,7 +607,7 @@ psql -h localhost -U <user> -d <db> -f 04-datos-semilla.sql
 
 ---
 
-## 14. Glosario
+## 17. Glosario
 
 | Término | Significado |
 |---------|-------------|
