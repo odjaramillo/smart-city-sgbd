@@ -232,9 +232,9 @@ CREATE INDEX idx_fact_telemetria_sk_fecha  ON fact_telemetria (sk_fecha);
 CREATE INDEX idx_fact_telemetria_sk_tiempo ON fact_telemetria (sk_tiempo);
 CREATE INDEX idx_fact_telemetria_sk_red    ON fact_telemetria (sk_red_electrica);
 CREATE INDEX idx_fact_telemetria_sk_tipo   ON fact_telemetria (sk_tipo_evento);
--- Unique: una lectura por medidor por hora.
+-- Unique: una lectura por medidor por hora (usando sk_fecha + sk_tiempo)
 CREATE UNIQUE INDEX uq_fact_telemetria_medidor_hora
-    ON fact_telemetria (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura, 'UTC'));
+    ON fact_telemetria (sk_red_electrica, sk_fecha, sk_tiempo);
 -- ===========================================================================
 -- ESTRATEGIA DE INDEXACION BRIN
 -- ===========================================================================

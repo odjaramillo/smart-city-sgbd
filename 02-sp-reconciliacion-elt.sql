@@ -459,8 +459,8 @@ DECLARE
     v_resultado JSONB;
     v_lote_id  INTEGER;
 BEGIN
-    v_lote_id := currval('seq_lote_procesamiento') + 1;
     CALL sp_reconciliar_interrupciones(p_fecha_inicio, p_fecha_fin);
+    v_lote_id := currval('seq_lote_procesamiento');
     SELECT jsonb_build_object(
         'lote_id',           id_lote,
         'estado',            estado,
@@ -712,7 +712,7 @@ BEGIN
       AND st.voltaje >= C_VOLTAGE_MIN
       AND st.voltaje <= C_VOLTAGE_MAX
       AND st.consumo_wh >= 0
-    ON CONFLICT (sk_red_electrica, DATE_TRUNC('hour', timestamp_lectura, 'UTC')) DO NOTHING;
+    ON CONFLICT (sk_red_electrica, sk_fecha, sk_tiempo) DO NOTHING;
 
     GET DIAGNOSTICS v_total_hechos = ROW_COUNT;
 
@@ -767,8 +767,8 @@ DECLARE
     v_resultado JSONB;
     v_lote_id  INTEGER;
 BEGIN
-    v_lote_id := currval('seq_lote_procesamiento') + 1;
     CALL sp_reconciliar_telemetria(p_fecha_inicio, p_fecha_fin);
+    v_lote_id := currval('seq_lote_procesamiento');
     SELECT jsonb_build_object(
         'lote_id',            id_lote,
         'estado',             estado,
