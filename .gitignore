@@ -23,5 +23,7 @@ Thumbs.db
 # Docker
 pgdata/
 
-# Engram cache
-.atl/.skill-registry.cache.json
+# OpenCode AI tooling (not part of the project)
+.atl/
+.engram/
+openspec/

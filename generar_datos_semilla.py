@@ -434,7 +434,7 @@ def emit_sql(events: dict, meters: list, ddl_cols: dict, args):
 
     # Asignar geography a medidores (round-robin)
     for i, meter in enumerate(meters):
-        meter["sk_geografia"] = (i % len(geo_rows)) + 1  # 1-based para referencia visual
+        meter["sk_geografia_urbana"] = (i % len(geo_rows)) + 1  # 1-based para referencia visual
 
     # Dimension red eléctrica — una fila por medidor (SCD tipo 2, activo)
     red_rows = []
@@ -446,6 +446,7 @@ def emit_sql(events: dict, meters: list, ddl_cols: dict, args):
             "transformador": meter["transformador"],
             "circuito": meter["circuito"],
             "subestacion": meter["subestacion"],
+            "sk_geografia_urbana": meter["sk_geografia_urbana"],
             "capacidad_kva": meter["capacidad_kva"],
             "estado_operativo": "ACTIVO",
             "fecha_inicio": args.start_date,
@@ -500,8 +501,9 @@ def emit_sql(events: dict, meters: list, ddl_cols: dict, args):
             "descripcion": descripcion,
         })
 
-    # staging_telemetria — lecturas horarias de consumo/voltaje
-    # Generar ~24 horas de lecturas por medidor (aproximadamente 1 lectura/hora)
+    # staging_telemetria — lecturas de consumo/voltaje
+    # Genera N lecturas por medidor por día durante todo el período.
+    # Por defecto: 1 lectura/día (diaria). Con --telemetry-daily-readings se controla.
     telemetry_rows = []
     # Horas del día con perfiles de consumo típicos (residencial)
     HOURLY_CONSUMPTION_PROFILE = {
@@ -515,23 +517,27 @@ def emit_sql(events: dict, meters: list, ddl_cols: dict, args):
 
     for meter in meters:
         meter_id = meter["id"]
-        # Generar lecturas para las últimas 48 horas
-        for hour_offset in range(48):
-            ts = datetime.now(timezone.utc) - timedelta(hours=hour_offset)
-            hour = ts.hour
-            # Consumption con variación aleatoria ±15%
-            consumption_factor = HOURLY_CONSUMPTION_PROFILE.get(hour, 1.0)
-            consumo_wh = base_consumption * consumption_factor * random.uniform(0.85, 1.15) * 1000  # Wh
-            # Voltage con pequeña variación ±5V
-            voltaje = base_voltage + random.uniform(-5, 5)
-            telemetry_rows.append({
-                "id_medidor": meter_id,
-                "timestamp_lectura": ts,
-                "consumo_wh": round(consumo_wh, 2),
-                "voltaje": round(voltaje, 2),
-                "tipo_lectura": "LECTURA_PERIODICA",
-                "procesado": False,
-            })
+        # Generar lecturas para cada día del período
+        for day_offset in range(args.days):
+            # Determinar horas de lectura para este día
+            hours_today = random.sample(range(24), k=min(args.telemetry_daily_readings, 24))
+            for hour in sorted(hours_today):
+                minute = random.randint(0, 59)
+                second = random.randint(0, 59)
+                ts = args.start_date + timedelta(days=day_offset, hours=hour, minutes=minute, seconds=second)
+                # Consumption con variación aleatoria ±15%
+                consumption_factor = HOURLY_CONSUMPTION_PROFILE.get(hour, 1.0)
+                consumo_wh = base_consumption * consumption_factor * random.uniform(0.85, 1.15) * 1000  # Wh
+                # Voltage con pequeña variación ±5V
+                voltaje = base_voltage + random.uniform(-5, 5)
+                telemetry_rows.append({
+                    "id_medidor": meter_id,
+                    "timestamp_lectura": ts,
+                    "consumo_wh": round(consumo_wh, 2),
+                    "voltaje": round(voltaje, 2),
+                    "tipo_lectura": "LECTURA_PERIODICA",
+                    "procesado": False,
+                })
 
     # Staging events — aplanar todos los eventos de todos los medidores
     staging_rows = []
@@ -672,6 +678,10 @@ def parse_args():
     parser.add_argument(
         "--transformers-per-circuit", type=int, default=3,
         help="Transformadores por circuito (default: 3)"
+    )
+    parser.add_argument(
+        "--telemetry-daily-readings", type=int, default=1,
+        help="Lecturas de telemetría por medidor por día (default: 1)"
     )
     return parser.parse_args()
 

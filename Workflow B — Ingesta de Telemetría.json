@@ -1,0 +1,144 @@
+{
+  "name": "B — Ingesta de Telemetría",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ingesta-telemetria",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "51425b70-169a-438d-a7bd-b20320f5b845",
+      "name": "Webhook Telemetría",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "96f02c68-800e-4e9d-833b-0b732ba04731"
+    },
+    {
+      "parameters": {
+        "jsCode": "const entrada = Array.isArray($json.body) ? $json.body : ($json.body ? [$json.body] : [$json]);\nreturn entrada.map((r) => {\n  const consumo_wh = Number(r.consumo_wh);\n  const voltaje = Number(r.voltaje);\n  return { json: {\n    id_medidor: parseInt(r.id_medidor, 10),\n    timestamp_lectura: new Date(r.timestamp_lectura).toISOString(),\n    consumo_wh: isNaN(consumo_wh) ? 0 : consumo_wh,\n    voltaje: isNaN(voltaje) ? 0 : voltaje,\n    tipo_lectura: r.tipo_lectura ?? 'LECTURA_PERIODICA'\n  }};\n});"
+      },
+      "id": "ee786f99-aa2d-43b4-ac21-3b66c8e7adb5",
+      "name": "Validar Telemetría",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "staging_telemetria"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id_medidor": "={{ $json.id_medidor }}",
+            "timestamp_lectura": "={{ $json.timestamp_lectura }}",
+            "consumo_wh": "={{ $json.consumo_wh }}",
+            "voltaje": "={{ $json.voltaje }}",
+            "tipo_lectura": "={{ $json.tipo_lectura }}",
+            "procesado": false
+          }
+        },
+        "options": {
+          "skipOnConflict": true
+        }
+      },
+      "id": "780ec1a0-ee45-4849-8196-abc885f62c43",
+      "name": "Insert staging_telemetria",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        448,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "g1x79rCOYSA9nt0S",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {\"recibidos\": $items().length, \"estado\": \"en_staging\"} }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "6451be05-dad6-44d2-8af7-e593e93f38df",
+      "name": "Responder Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        672,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Telemetría": {
+      "main": [
+        [
+          {
+            "node": "Validar Telemetría",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar Telemetría": {
+      "main": [
+        [
+          {
+            "node": "Insert staging_telemetria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert staging_telemetria": {
+      "main": [
+        [
+          {
+            "node": "Responder Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "c153bb25-e51b-4900-96be-077a45f2b1de",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "5cb3db85aecd95aef1b9b15298068769c161a4d757c9512e4eb9e90375e45a5b"
+  },
+  "id": "IA6C2wJAdJloJHnA",
+  "tags": []
+}
