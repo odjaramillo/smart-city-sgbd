@@ -38,7 +38,7 @@ CREATE TABLE staging_telemetria (
     id_staging           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     id_medidor           BIGINT        NOT NULL,
     timestamp_lectura    TIMESTAMPTZ   NOT NULL,
-    consumo_wh           NUMERIC(12,2) NOT NULL CHECK (consumo_wh >= 0),
+    consumo_wh           NUMERIC(12,2) NOT NULL, -- CHECK removido: el SP valida y desvía negativos a err_telemetria
     voltaje              NUMERIC(8,2)  NOT NULL CHECK (voltaje >= 0 AND voltaje <= 1000),
     tipo_lectura         VARCHAR(30)   NOT NULL DEFAULT 'LECTURA_PERIODICA'
         CHECK (tipo_lectura IN ('LECTURA_PERIODICA', 'LECTURA_EVENTO', 'HEARTBEAT')),
